@@ -1,8 +1,11 @@
 import requests , json, csv
 import pandas as pd
 
-# Overall FPL league ID, 314 for 2019/20 season.
-overallLeageID = 314
+
+# Zero Marginal Cost FPL league ID, 62572 for 2022/23 season.
+# Biryani Bros 62577
+# Football Sirius 860663
+overallLeageID = 62572
 
 # number of GW in 2019/20 season. Done as array to avoid calling api for blank GW 30-38.
 gameWeeks = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,39,40,
@@ -22,9 +25,9 @@ parsed = json.loads(data)
 managerParsed = parsed['standings']['results']
 
 # open 3 files for writing
-manager_data = open('data/2019-20/managers/top_managers.csv', 'w', newline='', encoding="utf-8")
-gw_data = open('data/2019-20/managers/top_managers_gwInfo.csv', 'w', newline='', encoding="utf-8")
-gw_picks = open('data/2019-20/managers/top_managers_gwPicks.csv', 'w', newline='', encoding="utf-8")
+manager_data = open('data/2022-23/managers/top_managers.csv', 'w', newline='', encoding="utf-8")
+gw_data = open('data/2022-23/managers/top_managers_gwInfo.csv', 'w', newline='', encoding="utf-8")
+gw_picks = open('data/2022-23/managers/top_managers_gwPicks.csv', 'w', newline='', encoding="utf-8")
 
 # create the 3 csv writer objects
 csvwriter1 = csv.writer(manager_data)
@@ -84,12 +87,12 @@ gw_data.close()
 gw_picks.close()
 
 # do some formatting on top_managers_gwPicks by adding the name of the player picked from player_idlist.csv
-df = pd.read_csv('data/2019-20/managers/top_managers_gwPicks.csv')
-df1 = pd.read_csv('data/2019-20/player_idlist.csv') 
+df = pd.read_csv('data/2022-23/managers/top_managers_gwPicks.csv')
+df1 = pd.read_csv('data/2022-23/player_idlist.csv')
 
 merged = df.merge(df1, on=['id'])
 merged.drop('first_name', axis=1, inplace=True)
 merged = merged[['team_id', 'gw', 'second_name', 'id', 'position', 'multiplier']]
 merged.rename({'id': 'player_id'}, axis=1, inplace=True)
 merged=merged.sort_values(by=['team_id', 'gw', 'position'])
-merged.to_csv('data/2019-20/managers/top_managers_gwPicks.csv',index=False)
+merged.to_csv('data/2022-23/managers/top_managers_gwPicks.csv',index=False)

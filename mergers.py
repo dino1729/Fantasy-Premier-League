@@ -4,7 +4,7 @@ import numpy as np
 from os.path import dirname, join
 import os
 
-def import_merged_gw(season='2021-22'):
+def import_merged_gw(season='2022-23'):
     """ Function to call merged_gw.csv file in every data/season folder
     Args:
         season (str): Name of the folder season that contains the merged_gw.csv file
@@ -35,7 +35,7 @@ def filter_players_exist_latest(df, col='position'):
         Null meaning that player doesnt exist in latest season hence can exclude.
     """
 
-    df[col] = df.groupby('name')[col].apply(lambda x: x.ffill().bfill())
+    df[col] = df.groupby('name', group_keys=False)[col].apply(lambda x: x.ffill().bfill())
     df = df[df[col].notnull()]
     return df
 

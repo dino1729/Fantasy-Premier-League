@@ -146,13 +146,13 @@ def main():
 
     for id, player in players.items():
         get_matches_data(player)
-        with open('data/2021-22/fbref/' + id + '.csv', 'w') as outf:
+        with open('data/2022-23/fbref/' + id + '.csv', 'w') as outf:
             writer = csv.DictWriter(outf, fieldnames=list(player.match_stat_set))
             writer.writeheader()
             for match in player.matches:
                 writer.writerow(match.data)
 
-    with open('data/2021-22/fbref_overview.csv', 'w') as outf:
+    with open('data/2022-23/fbref_overview.csv', 'w') as outf:
         writer = csv.DictWriter(outf, fieldnames=list(stats))
         writer.writeheader()
         for id, player in players.items():
