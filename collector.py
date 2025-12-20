@@ -4,7 +4,7 @@ import csv
 
 def get_teams(directory):
     teams = {}
-    fin = open(directory + "/teams.csv", 'rU')
+    fin = open(directory + "/teams.csv", 'r')
     reader = csv.DictReader(fin)
     for row in reader:
         teams[int(row['id'])] = row['name']
@@ -14,7 +14,7 @@ def get_teams(directory):
 def get_fixtures(directory):
     fixtures_home = {}
     fixtures_away = {}
-    fin = open(directory + "/fixtures.csv", 'rU')
+    fin = open(directory + "/fixtures.csv", 'r')
     reader = csv.DictReader(fin)
     for row in reader:
         fixtures_home[int(row['id'])] = int(row['team_h'])
@@ -25,8 +25,8 @@ def get_fixtures(directory):
 def get_positions(directory):
     positions = {}
     names = {}
-    pos_dict = {'1': "GK", '2': "DEF", '3': "MID", '4': "FWD"}
-    fin = open(directory + "/players_raw.csv", 'rU',encoding="utf-8")
+    pos_dict = {'1': "GK", '2': "DEF", '3': "MID", '4': "FWD", '5': "AM"}
+    fin = open(directory + "/players_raw.csv", 'r',encoding="utf-8")
     reader = csv.DictReader(fin)
     for row in reader:
         positions[int(row['id'])] = pos_dict[row['element_type']] 
@@ -36,7 +36,7 @@ def get_positions(directory):
 def get_expected_points(gw, directory):
     xPoints = {}
     try:
-        fin = open(os.path.join(directory, 'xP' + str(gw) + '.csv'), 'rU')
+        fin = open(os.path.join(directory, 'xP' + str(gw) + '.csv'), 'r')
         reader = csv.DictReader(fin)
         for row in reader:
             xPoints[int(row['id'])] = row['xP']
@@ -48,7 +48,7 @@ def merge_gw(gw, gw_directory):
     merged_gw_filename = "merged_gw.csv"
     gw_filename = "gw" + str(gw) + ".csv"
     gw_path = os.path.join(gw_directory, gw_filename)
-    fin = open(gw_path, 'rU', encoding="utf-8")
+    fin = open(gw_path, 'r', encoding="utf-8")
     reader = csv.DictReader(fin)
     fieldnames = reader.fieldnames
     fieldnames += ["GW"]
@@ -65,7 +65,7 @@ def merge_gw(gw, gw_directory):
     for row in rows:
         writer.writerow(row)
 
-def collect_gw(gw, directory_name, output_dir, root_directory_name="data/2023-23"):
+def collect_gw(gw, directory_name, output_dir, root_directory_name="data/2025-26"):
     rows = []
     fieldnames = []
     fixtures_home, fixtures_away = get_fixtures(root_directory_name)
@@ -76,7 +76,7 @@ def collect_gw(gw, directory_name, output_dir, root_directory_name="data/2023-23
         for fname in files:
             if fname == 'gw.csv':
                 fpath = os.path.join(root, fname)
-                fin = open(fpath, 'rU')
+                fin = open(fpath, 'r')
                 reader = csv.DictReader(fin)
                 fieldnames = reader.fieldnames
                 for row in reader:
@@ -115,7 +115,7 @@ def merge_all_gws(num_gws, gw_directory):
 def main():
     #collect_all_gws(sys.argv[1], sys.argv[2], sys.argv[3])
     merge_all_gws(int(sys.argv[1]), sys.argv[2])
-    #collect_gw(35, sys.argv[1], sys.argv[2])
+    #collect_gw(34, sys.argv[1], sys.argv[2])
 
 if __name__ == '__main__':
     main()

@@ -8,7 +8,7 @@ import csv
 def parse_data():
     """ Parse and store all the data
     """
-    season = '2022-23'
+    season = '2025-26'
     base_filename = 'data/' + season + '/'
     print("Getting data")
     data = get_data()
@@ -53,8 +53,8 @@ def parse_data():
         collect_gw(gw_num, player_base_filename, gw_base_filename, base_filename) 
         print("Merging gw scores")
         merge_gw(gw_num, gw_base_filename)
-    understat_filename = base_filename + 'understat'
-    parse_epl_data(understat_filename)
+    #understat_filename = base_filename + 'understat'
+    #parse_epl_data(understat_filename)
 
 def fixtures(base_filename):
     data = get_fixtures_data()

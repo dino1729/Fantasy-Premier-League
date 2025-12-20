@@ -1,10 +1,8 @@
-from numpy.lib.index_tricks import _diag_indices_from
 import pandas as pd 
-import numpy as np
 from os.path import dirname, join
 import os
 
-def import_merged_gw(season='2022-23'):
+def import_merged_gw(season='2021-22'):
     """ Function to call merged_gw.csv file in every data/season folder
     Args:
         season (str): Name of the folder season that contains the merged_gw.csv file
@@ -35,7 +33,8 @@ def filter_players_exist_latest(df, col='position'):
         Null meaning that player doesnt exist in latest season hence can exclude.
     """
 
-    df[col] = df.groupby('name', group_keys=False)[col].apply(lambda x: x.ffill().bfill())
+    result = df.groupby('name')[col].apply(lambda x: x.ffill().bfill())
+    df[col] = result.droplevel(0)
     df = df[df[col].notnull()]
     return df
 
@@ -69,5 +68,5 @@ def export_cleaned_data(df):
     path = os.getcwd()
     filename = 'cleaned_merged_seasons.csv'
     filepath = join(dirname(dirname("__file__")), path, 'data', filename)
-    df.to_csv(filepath, encoding = 'utf-8')
+    df.to_csv(filepath, encoding = 'utf-8', index=False)
     return df

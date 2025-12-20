@@ -1,10 +1,10 @@
 ,id,name,short_name,created,closed,rank,max_entries,league_type,scoring,admin_entry,start_event,entry_can_leave,entry_can_admin,entry_can_invite,has_cup,cup_league,cup_qualified,entry_rank,entry_last_rank
-0,6,Chelsea,team-6,2022-07-05T09:51:58.251559Z,False,,,s,c,,1,False,False,False,True,2405671.0,True,19987,30937
-1,249,USA,region-229,2022-07-05T09:52:00.241584Z,False,,,s,c,,1,False,False,False,True,2424308.0,True,7884,12036
-2,276,Gameweek 1,event-1,2022-07-05T09:52:00.459050Z,False,,,s,c,,1,False,False,False,False,,,272481,410493
-3,314,Overall,overall,2022-07-05T09:52:00.763442Z,False,,,s,c,,1,False,False,False,True,2371740.0,True,272692,410876
-4,62572,Zero Marginal Cost,,2022-07-05T20:01:41.006377Z,False,,,x,c,317429.0,1,False,True,True,True,,,2,3
-5,62577,Biryani Bros,,2022-07-05T20:01:42.129027Z,False,,,x,c,317429.0,1,False,True,True,True,,,1,2
-6,860663,Football Sirius,,2022-07-28T17:46:13.100314Z,False,,,x,c,3979099.0,1,True,False,False,True,,,1,1
-7,928433,NBC Sports League,brd-nbcsports,2022-07-30T07:35:19.341440Z,False,,,s,c,,1,False,False,False,True,2424311.0,True,7905,12070
-8,2385997,Second Chance,sc,2022-12-13T09:32:14.682834Z,False,,,s,c,,17,False,False,False,False,,,817181,1342641
+0,6,Chelsea,team-6,2022-07-05T09:51:58.251559Z,False,,,s,c,,1,False,False,False,True,2405671.0,True,18808,23261
+1,249,USA,region-229,2022-07-05T09:52:00.241584Z,False,,,s,c,,1,False,False,False,True,2424308.0,True,8291,10326
+2,276,Gameweek 1,event-1,2022-07-05T09:52:00.459050Z,False,,,s,c,,1,False,False,False,False,,,243320,303599
+3,314,Overall,overall,2022-07-05T09:52:00.763442Z,False,,,s,c,,1,False,False,False,True,2371740.0,True,243590,303971
+4,62572,Zero Marginal Cost,,2022-07-05T20:01:41.006377Z,False,,,x,c,317429.0,1,False,True,True,True,2743354.0,True,1,1
+5,62577,Biryani Bros,,2022-07-05T20:01:42.129027Z,False,,,x,c,317429.0,1,False,True,True,True,3510319.0,True,1,2
+6,860663,Football Sirius,,2022-07-28T17:46:13.100314Z,False,,,x,c,3979099.0,1,False,False,False,True,2644596.0,True,1,1
+7,928433,NBC Sports League,brd-nbcsports,2022-07-30T07:35:19.341440Z,False,,,s,c,,1,False,False,False,True,2424311.0,True,8308,10352
+8,2385997,Second Chance,sc,2022-12-13T09:32:14.682834Z,False,,,s,c,,17,False,False,False,False,,,434750,562064

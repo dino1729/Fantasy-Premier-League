@@ -4,6 +4,18 @@
 Fantasy-Premier-League
 ======================
 
+# NOTICE
+
+This weekly updates for the repository have been stopped at the end of the 2024-25 season. NO weekly updates will be posted to this repository after the 2024-25 season.
+
+Instead, there will be 3 major updates posted to this repository:
+
++ One at the start of the season
++ One at the end of the January transfer window
++ One at the end of the season
+
+## Description
+
 A FPL library that gets all the basic stats for each player, gw-specific data for each player and season history of each player
 
 ### How to CIte this dataset?
@@ -42,6 +54,20 @@ The data folder contains the data from past seasons as well as the current seaso
 + season/players/player_name/gws.csv : GW-by-GW stats for that specific player
 + season/players/player_name/history.csv : Prior seasons history stats for that specific player.
 
+### Accessing the Data Directly in Python
+
+You can access data files within this repository programmatically using Python and the `pandas` library. Below is an example using the `data/2023-24/gws/merged_gw.csv` file. Similar methods can be applied to other data files in the repository. Note this is using the raw URL for direct file access, bypassing the GitHub UI.
+
+```python
+import pandas as pd
+
+# URL of the CSV file (example)
+url = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data/2023-24/gws/merged_gw.csv"
+
+# Read the CSV file into a pandas DataFrame
+df = pd.read_csv(url)
+```
+
 ### Player Position Data
 
 In players_raw.csv, element_type is the field that corresponds to the position.
@@ -75,6 +101,8 @@ python teams_scraper.py <team_id>
 This will create a new folder called "team_<team_id>_data18-19" with individual files of all the important data
 
 # Notable Usages of this Repository
+
++ [Picking the Ultimate Fantasy Premier League Team with ArcticDB by Matthew Simpson](https://medium.com/arcticdb/picking-the-ultimate-fantasy-premier-league-team-with-arcticdb-4ae31ff5d817)
 
 + [Analysing Fantasy Premier League data in R Course by Arif P. Sulistiono](https://github.com/arifpras/BelutListrik)
 
@@ -150,4 +178,10 @@ This will create a new folder called "team_<team_id>_data18-19" with individual 
 
 + [My Personal Blog](http://vaastavanand.com/blog/)
 
-+ [FPL.lol - Query FPL data with SQL in your browser](https://www.fpl.lol)
++ [FPL.zoid.dev - Query FPL data with SQL in your browser](https://fpl.zoid.dev)
+
++ [Premier League Table by FPL Points by Edward F](https://fpl-pl-table.streamlit.app/)
+
++ [FPL Manager Medals by Edward F](https://fpl-manager-medals.streamlit.app/)
+
++ [SiegFPL by @infinitetrooper](https://fpl.infinitetrooper.com/)
