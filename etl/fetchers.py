@@ -18,6 +18,7 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import logging
+import pandas as pd
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -27,10 +28,12 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_RAW = PROJECT_ROOT / 'data' / 'raw'
 DATA_MAPPINGS = PROJECT_ROOT / 'data' / 'mappings'
+DATA_FPL_CORE = PROJECT_ROOT / 'data' / 'fpl_core'
 
 # Ensure directories exist
 DATA_RAW.mkdir(parents=True, exist_ok=True)
 DATA_MAPPINGS.mkdir(parents=True, exist_ok=True)
+DATA_FPL_CORE.mkdir(parents=True, exist_ok=True)
 
 
 class FPLFetcher:
@@ -249,12 +252,14 @@ class ClubEloFetcher:
         self._cache = {}
     
     def get_ratings(self, for_date: Optional[date] = None, 
-                    save_raw: bool = True) -> Dict[int, float]:
+                    save_raw: bool = True, 
+                    use_fpl_core: bool = True) -> Dict[int, float]:
         """Fetch Elo ratings for all Premier League teams.
         
         Args:
             for_date: Date to fetch ratings for (default: today).
             save_raw: Whether to save raw CSV to data/raw/.
+            use_fpl_core: If True, try to use FPL Core Insights Elo data instead of API.
             
         Returns:
             Dict mapping FPL team_id -> Elo rating.
@@ -267,27 +272,23 @@ class ClubEloFetcher:
         if date_str in self._cache:
             return self._cache[date_str]
         
-        url = f"{self.API_URL}/{date_str}"
+        # Try FPL Core Insights first (includes Elo ratings)
+        if use_fpl_core:
+            try:
+                from etl.fetchers import FPLCoreInsightsFetcher
+                fpl_core = FPLCoreInsightsFetcher(season="2025-2026")
+                teams_df = fpl_core.get_teams()
+                if teams_df is not None and 'elo' in teams_df.columns:
+                    ratings = dict(zip(teams_df['id'], teams_df['elo']))
+                    logger.info(f"Using Elo ratings from FPL Core Insights ({len(ratings)} teams)")
+                    self._cache[date_str] = ratings
+                    return ratings
+            except Exception as e:
+                logger.warning(f"Failed to get Elo from FPL Core Insights: {e}")
         
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            raw_csv = response.text
-            
-            if save_raw:
-                filepath = DATA_RAW / f'clubelo_{date_str}.csv'
-                with open(filepath, 'w') as f:
-                    f.write(raw_csv)
-                logger.info(f"Saved ClubElo data to {filepath}")
-            
-            # Parse CSV
-            ratings = self._parse_csv(raw_csv)
-            self._cache[date_str] = ratings
-            return ratings
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch ClubElo data: {e}")
-            return self._get_fallback_ratings()
+        # Skip ClubElo API call - servers are down
+        logger.warning("Skipping ClubElo API (servers down), using fallback ratings")
+        return self._get_fallback_ratings()
     
     def _parse_csv(self, csv_text: str) -> Dict[int, float]:
         """Parse ClubElo CSV into FPL team_id -> Elo mapping."""
@@ -482,6 +483,291 @@ class FixtureDifficultyCalculator:
             return 5
 
 
+class FPLCoreInsightsFetcher:
+    """Fetches enhanced FPL data from the FPL Core Insights repository.
+    
+    FPL Core Insights provides comprehensive datasets that combine:
+    - Official FPL API data
+    - Detailed match statistics (Opta-like metrics)
+    - ClubElo ratings
+    - Historical data across multiple seasons
+    
+    Data structure:
+    - Season-level: data/{season}/players.csv, playerstats.csv, teams.csv, gameweek_summaries.csv
+    - Gameweek-level: data/{season}/By Gameweek/GW{N}/*.csv
+    
+    Data is updated twice daily at 5:00 AM and 5:00 PM UTC.
+    Source: https://github.com/olbauday/FPL-Core-Insights
+    """
+    
+    BASE_URL = "https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data"
+    CACHE_DURATION = 6 * 3600  # 6 hours (data updates twice daily)
+    
+    # Available season-level datasets
+    SEASON_DATASETS = [
+        'players',           # Player information (season aggregate)
+        'playerstats',       # FPL API equivalent data (season aggregate)
+        'teams',             # Team info with Elo ratings
+        'gameweek_summaries' # Summary stats per gameweek
+    ]
+    
+    # Available gameweek-level datasets
+    GW_DATASETS = [
+        'fixtures',              # Fixtures for this gameweek
+        'matches',               # Completed matches
+        'player_gameweek_stats', # Player stats for this gameweek
+        'playermatchstats',      # Detailed match-level stats
+        'players',               # Player info snapshot
+        'playerstats',           # FPL API data snapshot
+        'teams'                  # Team info snapshot
+    ]
+    
+    def __init__(self, season: str = "2025-2026", cache_dir: Optional[Path] = None):
+        """Initialize FPL Core Insights fetcher.
+        
+        Args:
+            season: Season in format "YYYY-YYYY" (e.g., "2025-2026")
+            cache_dir: Directory to cache downloaded CSVs. Defaults to data/fpl_core/
+        """
+        self.season = season
+        self.cache_dir = cache_dir or DATA_FPL_CORE
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create season subdirectory
+        self.season_cache_dir = self.cache_dir / season
+        self.season_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _download_csv(self, dataset_name: str, gameweek: Optional[int] = None, 
+                      force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Download a CSV dataset from FPL Core Insights.
+        
+        Args:
+            dataset_name: Name of the dataset (e.g., 'playerstats', 'teams')
+            gameweek: If specified, download gameweek-specific file from "By Gameweek/GW{N}/"
+            force_refresh: If True, bypass cache and download fresh data
+            
+        Returns:
+            DataFrame with the dataset or None if download fails
+        """
+        # Determine cache file path
+        if gameweek:
+            cache_file = self.season_cache_dir / f"gw{gameweek}" / f"{dataset_name}.csv"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            url_path = f"{self.season}/By%20Gameweek/GW{gameweek}/{dataset_name}.csv"
+        else:
+            cache_file = self.season_cache_dir / f"{dataset_name}.csv"
+            url_path = f"{self.season}/{dataset_name}.csv"
+        
+        # Check cache
+        if not force_refresh and cache_file.exists():
+            cache_age = time.time() - cache_file.stat().st_mtime
+            if cache_age < self.CACHE_DURATION:
+                logger.info(f"Using cached {dataset_name}.csv (age: {cache_age/3600:.1f}h)")
+                try:
+                    return pd.read_csv(cache_file)
+                except Exception as e:
+                    logger.warning(f"Failed to read cached {dataset_name}: {e}")
+        
+        # Download fresh data
+        url = f"{self.BASE_URL}/{url_path}"
+        logger.info(f"Downloading {dataset_name}.csv from FPL Core Insights...")
+        
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            # Save to cache
+            with open(cache_file, 'wb') as f:
+                f.write(response.content)
+            
+            # Load and return
+            df = pd.read_csv(cache_file)
+            logger.info(f"Downloaded {dataset_name}.csv ({len(df)} rows)")
+            return df
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to download {dataset_name}: {e}")
+            
+            # Fall back to cached data if available
+            if cache_file.exists():
+                logger.warning(f"Using stale cached {dataset_name}.csv")
+                return pd.read_csv(cache_file)
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error processing {dataset_name}: {e}")
+            return None
+    
+    def get_playerstats(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch player statistics (FPL API equivalent data).
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific data. Otherwise, fetch season aggregate.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('playerstats', gameweek, force_refresh)
+    
+    def get_playermatchstats(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch detailed player match statistics (Opta-like metrics).
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific data.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('playermatchstats', gameweek, force_refresh)
+    
+    def get_matches(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch match information.
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific data.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('matches', gameweek, force_refresh)
+    
+    def get_fixtures(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch upcoming fixtures.
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific data.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('fixtures', gameweek, force_refresh)
+    
+    def get_players(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch player information.
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific snapshot. Otherwise, fetch season aggregate.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('players', gameweek, force_refresh)
+    
+    def get_teams(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch team information with Elo ratings.
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific snapshot. Otherwise, fetch season aggregate.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('teams', gameweek, force_refresh)
+    
+    def get_gameweek_summaries(self, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch gameweek summaries (season-level file)."""
+        return self._download_csv('gameweek_summaries', None, force_refresh)
+    
+    def get_player_gameweek_stats(self, gameweek: int, force_refresh: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch player gameweek stats for a specific gameweek.
+        
+        Args:
+            gameweek: Gameweek number.
+            force_refresh: If True, bypass cache.
+        """
+        return self._download_csv('player_gameweek_stats', gameweek, force_refresh)
+    
+    def fetch_all(self, gameweek: Optional[int] = None, force_refresh: bool = False) -> Dict[str, Optional[pd.DataFrame]]:
+        """Fetch all available datasets.
+        
+        Args:
+            gameweek: If specified, fetch gameweek-specific data. Otherwise, fetch season-level data.
+            force_refresh: If True, bypass cache and download fresh data
+            
+        Returns:
+            Dict mapping dataset names to DataFrames
+        """
+        logger.info(f"Fetching FPL Core Insights datasets (Season: {self.season}, GW: {gameweek or 'season-level'})...")
+        
+        results = {}
+        
+        if gameweek:
+            # Fetch gameweek-specific datasets
+            for dataset in self.GW_DATASETS:
+                df = self._download_csv(dataset, gameweek, force_refresh)
+                results[dataset] = df
+                if df is not None:
+                    logger.info(f"  {dataset} (GW{gameweek}): {len(df)} rows")
+        else:
+            # Fetch season-level datasets
+            for dataset in self.SEASON_DATASETS:
+                df = self._download_csv(dataset, None, force_refresh)
+                results[dataset] = df
+                if df is not None:
+                    logger.info(f"  {dataset} (season): {len(df)} rows")
+        
+        return results
+    
+    def fetch_all_gameweeks(self, up_to_gw: int, force_refresh: bool = False) -> Dict[int, Dict[str, Optional[pd.DataFrame]]]:
+        """Fetch all gameweek data from GW1 to specified gameweek.
+        
+        Args:
+            up_to_gw: Last gameweek to fetch (inclusive).
+            force_refresh: If True, bypass cache and download fresh data.
+            
+        Returns:
+            Dict mapping gameweek number -> dict of dataset DataFrames
+        """
+        logger.info(f"Fetching all gameweek data from GW1 to GW{up_to_gw}...")
+        
+        all_gw_data = {}
+        for gw in range(1, up_to_gw + 1):
+            logger.info(f"Fetching GW{gw} data...")
+            gw_data = {}
+            
+            for dataset in self.GW_DATASETS:
+                df = self._download_csv(dataset, gw, force_refresh)
+                gw_data[dataset] = df
+            
+            all_gw_data[gw] = gw_data
+            
+            # Log summary
+            successful = sum(1 for df in gw_data.values() if df is not None)
+            logger.info(f"  GW{gw}: {successful}/{len(self.GW_DATASETS)} datasets fetched")
+        
+        return all_gw_data
+    
+    def get_cache_info(self, gameweek: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+        """Get information about cached datasets.
+        
+        Args:
+            gameweek: If specified, check gameweek-specific cache. Otherwise, check season-level cache.
+            
+        Returns:
+            Dict mapping dataset names to cache info (exists, age_hours, rows)
+        """
+        info = {}
+        datasets = self.GW_DATASETS if gameweek else self.SEASON_DATASETS
+        
+        for dataset in datasets:
+            if gameweek:
+                cache_file = self.season_cache_dir / f"gw{gameweek}" / f"{dataset}.csv"
+            else:
+                cache_file = self.season_cache_dir / f"{dataset}.csv"
+            
+            if cache_file.exists():
+                age_seconds = time.time() - cache_file.stat().st_mtime
+                try:
+                    df = pd.read_csv(cache_file)
+                    rows = len(df)
+                except:
+                    rows = -1
+                
+                info[dataset] = {
+                    'exists': True,
+                    'age_hours': age_seconds / 3600,
+                    'rows': rows,
+                    'needs_refresh': age_seconds > self.CACHE_DURATION
+                }
+            else:
+                info[dataset] = {
+                    'exists': False,
+                    'age_hours': None,
+                    'rows': None,
+                    'needs_refresh': True
+                }
+        
+        return info
+
+
 def fetch_all_data(save_raw: bool = True) -> Dict[str, Any]:
     """Convenience function to fetch all data sources.
     
@@ -491,18 +777,28 @@ def fetch_all_data(save_raw: bool = True) -> Dict[str, Any]:
     - elo_ratings: Current ClubElo ratings
     - fixture_difficulties: Elo-based FDR for all teams
     - current_gw: Current gameweek number
+    - fpl_core: FPL Core Insights enhanced datasets
     """
     logger.info("Starting full data fetch...")
     
     fpl = FPLFetcher()
+    fpl_core = FPLCoreInsightsFetcher(season="2025-2026")
     elo = ClubEloFetcher()
-    calc = FixtureDifficultyCalculator(fpl, elo)
     
     bootstrap = fpl.get_bootstrap_static(save_raw=save_raw)
     fixtures = fpl.get_fixtures(save_raw=save_raw)
-    elo_ratings = elo.get_ratings(save_raw=save_raw)
-    difficulties = calc.get_fixture_difficulties()
     current_gw = fpl.get_current_gameweek()
+    
+    # Fetch both season-level and current gameweek data from FPL Core
+    fpl_core_season = fpl_core.fetch_all()
+    fpl_core_gw = fpl_core.fetch_all(gameweek=current_gw)
+    
+    # Get Elo ratings (uses FPL Core data, not ClubElo API)
+    elo_ratings = elo.get_ratings(save_raw=save_raw, use_fpl_core=True)
+    
+    # Calculate fixture difficulties
+    calc = FixtureDifficultyCalculator(fpl, elo)
+    difficulties = calc.get_fixture_difficulties()
     
     logger.info(f"Fetched {len(bootstrap.get('elements', []))} players, "
                 f"{len(fixtures)} fixtures, "
@@ -514,7 +810,9 @@ def fetch_all_data(save_raw: bool = True) -> Dict[str, Any]:
         'fixtures': fixtures,
         'elo_ratings': elo_ratings,
         'fixture_difficulties': difficulties,
-        'current_gw': current_gw
+        'current_gw': current_gw,
+        'fpl_core_season': fpl_core_season,
+        'fpl_core_gameweek': fpl_core_gw
     }
 
 

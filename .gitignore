@@ -1,11 +1,27 @@
+# IDE / Editor
 .vscode
+.idea
+
+# Python
 __pycache__
-team_1518207_data23_24
+*.pyc
+*.pyo
 venv
-.claude
+.venv
 .pytest_cache
+
+# macOS
+.DS_Store
+
+# Project specific
+.claude
+team_*_data*
+
+# Reports - cache and generated files
 reports/cache
 reports/plots
+reports/report_*.tex
+reports/report_*.pdf
 reports/report_*.log
 reports/report_*.aux
 reports/report_*.out
@@ -14,7 +30,7 @@ reports/report_*.lof
 reports/report_*.lot
 reports/report_*.fls
 reports/report_*.fdb_latexmk
-data/raw
-data/parquet
+
+# Data files - ignore all data
+data/
 models/artifacts
-.DS_Store

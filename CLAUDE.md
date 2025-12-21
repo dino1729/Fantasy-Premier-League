@@ -19,12 +19,12 @@ bash scripts/pip install -r requirements.txt
 # Install dependencies
 python -m pip install -r requirements.txt
 
-# Generate report (preferred entrypoint)
-./reports/run_report.sh <TEAM_ID> [GAMEWEEK]
-# Example: ./reports/run_report.sh 847569 16
+# Generate report (preferred entrypoint - now at project root)
+./run_report.sh <TEAM_ID> [GAMEWEEK]
+# Example: ./run_report.sh 847569 16
 
-# Generate LaTeX only (no PDF)
-python reports/generate_fpl_report.py --team <TEAM_ID> --gw <N> --no-pdf
+# Generate LaTeX only (no PDF) - now at project root
+python generate_fpl_report.py --team <TEAM_ID> --gw <N> --no-pdf
 
 # Run unit tests
 python -m unittest discover -s tests -v
@@ -45,7 +45,7 @@ python main.py --update-data --train-models --team <TEAM_ID>
 ## Architecture
 
 ### Layer 1: Data Engineering
-- **FPL API integration**: `getters.py` (legacy) or `etl/fetchers.py` (modern)
+- **FPL API integration**: `scraping/fpl_api.py` (primary) or `etl/fetchers.py` (modern ETL)
 - **Data consolidation**: `reports/fpl_report/data_fetcher.py` wraps API calls with enrichment
 - **Caching**: `reports/fpl_report/cache_manager.py` - persistent caching with TTLs (bootstrap: 3600s, team_data: 300s)
 - **Storage**: Parquet files in `data/parquet/`, CSVs in `data/<season>/`
@@ -72,17 +72,20 @@ FPL API → FPLDataFetcher → PlayerAnalyzer + FPLPointsPredictor
 
 | Directory | Purpose |
 |-----------|---------|
-| `reports/` | Report generation pipeline - primary focus of development |
-| `reports/fpl_report/` | Core analysis modules (data_fetcher, predictor, transfer_recommender, etc.) |
+| `scraping/` | FPL API and external data source fetchers (fpl_api.py, understat.py, fbref.py) |
+| `processing/` | Data cleaning, parsing, and merging utilities (cleaners.py, parsers.py, mergers.py) |
+| `utils/` | General utilities (utility.py, schedule.py, gameweek.py) |
 | `etl/` | Modern ETL pipeline (fetchers, transformers, pipeline orchestration) |
 | `models/` | ML model training infrastructure and artifacts |
 | `solver/` | MIP optimizer using sasoptpy + HiGHS |
+| `reports/` | Report generation pipeline and output files |
+| `reports/fpl_report/` | Core analysis modules (data_fetcher, predictor, transfer_recommender, etc.) |
 | `data/<season>/` | Historical + current season data (gws/, players/, CSVs) |
 | `tests/` | Unit tests using unittest framework |
 
 ## Configuration
 
-User settings are in `reports/config.yml`:
+User settings are in `config.yml` (project root):
 - `team_id`: Your FPL team ID
 - `competitors`: List of team IDs for mini-league comparison
 - `gameweek`: Target GW (null = auto-detect)
@@ -97,6 +100,43 @@ CLI args override config values.
 - Naming: `snake_case` for files/functions, `CapWords` for classes, `UPPER_SNAKE_CASE` for constants
 - Position codes: `GKP`, `DEF`, `MID`, `FWD` (API uses numeric 1, 2, 3, 4)
 - Season folder naming: `YYYY-YY` (e.g., `2025-26`)
+
+## Import Paths
+
+The codebase has been reorganized. Use these import patterns:
+
+```python
+# Scraping / FPL API
+from scraping.fpl_api import get_data, get_fixtures_data
+
+# Data processing
+from processing.cleaners import clean_players
+from processing.parsers import parse_players
+
+# Utilities
+from utils.utility import uprint
+from utils.gameweek import get_recent_gameweek_id
+
+# Report modules
+from reports.fpl_report.data_fetcher import FPLDataFetcher
+from reports.fpl_report.player_analyzer import PlayerAnalyzer
+
+# ETL (modern)
+from etl.fetchers import FPLFetcher, ClubEloFetcher
+
+# Models
+from models.train import ModelTrainer
+from models.inference import FPLInferencePipeline
+
+# Solver
+from solver.optimizer import TransferMIPSolver
+```
+
+Legacy imports (deprecated but still work for backward compatibility):
+```python
+from getters import get_data  # Use scraping.fpl_api instead
+from parsers import parse_players  # Use processing.parsers instead
+```
 
 ## Data Contracts
 

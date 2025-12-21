@@ -15,7 +15,7 @@ import json
 import time
 import pandas as pd
 from typing import Dict, List, Optional
-from getters import (
+from scraping.fpl_api import (
     get_data,
     get_individual_player_data,
     get_entry_data,
@@ -49,12 +49,15 @@ class FPLDataFetcher:
         self._player_history_cache = {}
         
         # Initialize fetchers for Elo calculation
-        # We wrap our self as the FPLFetcher for the calculator to avoid circular dependency issues
-        # or just use the ETL one directly if needed, but here we can pass self if we implement get_fixtures
+        # NOTE: ClubElo API is disabled - using FPL Core Insights Elo ratings instead
         self._elo_fetcher = ClubEloFetcher()
         # Initialize ETL FPL Fetcher for the calculator
         self._etl_fpl_fetcher = ETLFPLFetcher()
-        self._difficulty_calculator = FixtureDifficultyCalculator(self._etl_fpl_fetcher, self._elo_fetcher)
+        try:
+            self._difficulty_calculator = FixtureDifficultyCalculator(self._etl_fpl_fetcher, self._elo_fetcher)
+        except Exception as e:
+            logger.warning(f"FixtureDifficultyCalculator initialization failed: {e}")
+            self._difficulty_calculator = None
         
         # Initialize cache manager
         self.cache = CacheManager(enabled=use_cache)

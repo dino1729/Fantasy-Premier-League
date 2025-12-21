@@ -9,17 +9,16 @@ from typing import List, Dict
 import pandas as pd
 
 
-# Ensure we can import the in-repo package under reports/fpl_report
+# Add repo root to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REPORTS_DIR = REPO_ROOT / "reports"
-if str(REPORTS_DIR) not in sys.path:
-    sys.path.insert(0, str(REPORTS_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
-from fpl_report.data_fetcher import FPLDataFetcher, build_competitive_dataset
-from fpl_report.transfer_recommender import TransferRecommender
-from fpl_report.plot_generator import PlotGenerator
-from fpl_report.latex_generator import LaTeXReportGenerator
+from reports.fpl_report.data_fetcher import FPLDataFetcher, build_competitive_dataset
+from reports.fpl_report.transfer_recommender import TransferRecommender
+from reports.fpl_report.plot_generator import PlotGenerator
+from reports.fpl_report.latex_generator import LaTeXReportGenerator
 
 
 class DummyAnalyzer:

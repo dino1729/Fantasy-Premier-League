@@ -157,16 +157,10 @@ def run_solver(team_id: int,
     """
     logger.info("🧮 Optimizing Squad with MIP Solver...")
     
-    # Add reports directory to path
-    import sys
-    reports_path = PROJECT_ROOT / 'reports'
-    if str(reports_path) not in sys.path:
-        sys.path.insert(0, str(reports_path))
-    
-    from fpl_report.data_fetcher import FPLDataFetcher
-    from fpl_report.player_analyzer import PlayerAnalyzer
-    from fpl_report.transfer_recommender import TransferRecommender
-    from fpl_report.transfer_strategy import TransferStrategyPlanner
+    from reports.fpl_report.data_fetcher import FPLDataFetcher
+    from reports.fpl_report.player_analyzer import PlayerAnalyzer
+    from reports.fpl_report.transfer_recommender import TransferRecommender
+    from reports.fpl_report.transfer_strategy import TransferStrategyPlanner
     
     # Initialize fetcher
     fetcher = FPLDataFetcher(team_id)
