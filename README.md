@@ -1,187 +1,211 @@
-[![GitSpo Mentions](https://gitspo.com/badges/mentions/vaastav/Fantasy-Premier-League?style=flat-square)](https://gitspo.com/mentions/vaastav/Fantasy-Premier-League)
-[![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/donate?hosted_button_id=RQ2V64LXSKPV4)
+# Fantasy Premier League (FPL) Report Generator
 
-Fantasy-Premier-League
-======================
+Generate a detailed LaTeX/PDF report for a Fantasy Premier League team: squad breakdown, performance trends, transfer recommendations, and optional competitive/league-aware analysis.
 
-# NOTICE
+This repo also includes an embedded historical dataset under `data/` used by some scripts and downstream analyses.
 
-This weekly updates for the repository have been stopped at the end of the 2024-25 season. NO weekly updates will be posted to this repository after the 2024-25 season.
+## Quick Start (Recommended)
 
-Instead, there will be 3 major updates posted to this repository:
+> **Important Note:** GW17 is currently ongoing. During this phase, please limit report generation to **GW16** to ensure data stability.
+> TODO: Remove this restriction once GW17 is complete.
 
-+ One at the start of the season
-+ One at the end of the January transfer window
-+ One at the end of the season
+1. Activate the existing virtual environment (avoid reinstalling packages / duplicate envs):
+   - macOS/Linux: `source venv/bin/activate`
+   - Windows: `.\venv\Scripts\activate`
 
-## Description
+2. Install Python dependencies: `python -m pip install -r requirements.txt`
 
-A FPL library that gets all the basic stats for each player, gw-specific data for each player and season history of each player
+3. Generate a report (preferred entrypoint): `./reports/run_report.sh <TEAM_ID> [GAMEWEEK]`
+   - Example (use GW16): `./reports/run_report.sh 847569 16`
+   - Help: `./reports/run_report.sh --help`
+   - LaTeX only (no PDF): `python reports/generate_fpl_report.py --team <TEAM_ID> --gw 16 --no-pdf`
 
-### How to CIte this dataset?
+Outputs are written to `reports/report_<TEAM_ID>.tex` and `reports/report_<TEAM_ID>.pdf`.
 
-BibTeX:
+## Requirements
 
+- Python 3
+- `zsh` (for `./reports/run_report.sh`)
+- Internet access (fetches live data from the official FPL API)
+- `pdflatex` (TeX Live / MacTeX) for PDF compilation
+
+## Project Layout
+
+- `reports/run_report.sh`: one-command report generation workflow
+- `reports/generate_fpl_report.py`: report generator CLI (used by `run_report.sh`)
+- `reports/fpl_report/`: analysis, plotting, caching, LaTeX generation modules
+- `data/<season>/`: season datasets (CSV structure described below)
+- `tests/`: unit tests (`unittest`)
+
+## Architecture (Technical)
+
+### End-to-End Pipeline
+
+1. `./reports/run_report.sh` runs `python3 reports/generate_fpl_report.py --team <TEAM_ID> --no-pdf` to generate `reports/report_<TEAM_ID>.tex` and plots in `reports/plots/`.
+2. The script then runs `pdflatex` twice to compile `reports/report_<TEAM_ID>.pdf` (cross-references/TOC).
+
+At a high level:
+
+`FPL API + local fixtures` → `FPLDataFetcher` → `PlayerAnalyzer` + `FPLPointsPredictor` → `TransferRecommender` + `TransferStrategyPlanner` + draft optimizers → `PlotGenerator` → `LaTeXReportGenerator.compile_report()` → `pdflatex`
+
+### Data Layer (`reports/fpl_report/data_fetcher.py`, `getters.py`)
+
+The report is driven primarily by live FPL API data (via `getters.py`), with optional local CSV fallbacks:
+
+- `GET /api/bootstrap-static/`: player master data (`elements`), teams, events (GW metadata).
+- `GET /api/element-summary/<player_id>/`: per-player GW history (targets for modelling + form trends).
+- `GET /api/entry/<team_id>/history/`: entry season history (`current`) and chips.
+- `GET /api/entry/<team_id>/event/<gw>/picks/`: squad picks for a GW (captaincy, multipliers, bench order).
+- `GET /api/entry/<team_id>/transfers/`: transfer log (enriched for reporting).
+- `GET /api/fixtures/`: fixture list (FDR + home/away).
+
+Key derived datasets in `FPLDataFetcher`:
+
+- `get_current_squad(gw)`: pick list + player stats snapshot.
+- `get_season_history()`: “full season” structure with GW points/rank and the actual XI contributions (injects each player’s `event_points` from their history row for that GW).
+- `get_upcoming_fixtures(team_id)`: FDR-aware next fixtures.
+
+### Caching (`reports/fpl_report/cache_manager.py`, `reports/cache/`)
+
+API responses and computed artifacts are cached as pickled objects with TTLs (seconds) to speed iteration:
+
+- Examples: `bootstrap` (3600), `team_data` (300), `player_history` (3600), `gw_picks` (300), `competitive` (300).
+- Control via CLI: `--no-cache`, `--clear-cache`, `--cache-stats`.
+
+Because cached objects are pickles, upgrading Python/pandas can require clearing `reports/cache/`.
+
+### Player Analysis (`reports/fpl_report/player_analyzer.py`)
+
+Per-player deep dives compute:
+
+- Form trend: linear regression slope over last `window` GWs (`scipy.stats.linregress`) + volatility (CV%).
+- ICT decomposition: influence/creativity/threat shares + ranks.
+- xGI vs returns: compares `expected_*` (from FPL API) to goals/assists and classifies over/underperformance.
+- Peer percentiles: percentile ranks vs same-position players with `min_minutes`.
+
+These outputs feed LaTeX “deep dive” sections and underperformer detection.
+
+### Points Prediction Model (`reports/fpl_report/predictor.py`)
+
+`FPLPointsPredictor` predicts player points for upcoming GWs and powers transfer EV/strategy:
+
+- Models: ensemble mean of `GradientBoostingRegressor` and `RandomForestRegressor` (features standardized via `StandardScaler`).
+- Training rows: for each `(player_id, gw)` with `gw >= 5`, target is `total_points` in GW `gw`, features computed from the prior 4 GWs.
+- Split: time-ordered train/validation split to reduce leakage.
+
+Feature families (see `FPLPointsPredictor.feature_cols`):
+
+- Rolling form (last 4): avg points/minutes/ICT/bonus/BPS, xG/xA/xGI, clean sheets, saves.
+- Context: fixture difficulty (`team_*_difficulty`), home/away.
+- Team strength: derived from finished fixtures as goals scored/conceded per game for team and opponent.
+- Momentum: short-window deltas for points and minutes.
+
+Outputs:
+
+- `predict(player_ids)`: next-GW expected points.
+- `predict_multiple_gws(player_ids, n)`: per-GW vector + `cumulative` and a simple consistency-based `confidence`.
+- Metrics: MAE/RMSE/R² available via `get_model_metrics()` and summarized in the report.
+
+Note: The module includes scaffolding for Understat ingestion, but Understat data is not currently wired into feature generation.
+
+### Transfer Suggestions (`reports/fpl_report/transfer_recommender.py`)
+
+Pipeline:
+
+1. `identify_underperformers()` flags players using heuristics (low form, falling trend, low minutes proxy, bottom peer quartile, “no minutes”).
+2. `get_recommendations()` builds same-position candidate pools constrained by `bank + sell_price`, filters unavailable players (`status != 'a'` or `chance_of_playing_next_round < 75`), trains the predictor on a candidate set, then scores replacements.
+
+Replacement scoring is a weighted sum over normalized components:
+
+```text
+score = 0.20*form + 0.20*fixtures + 0.10*expected_points
+      + 0.30*predicted_points + 0.10*ownership_diff + 0.10*value
 ```
+
+Where:
+
+- `fixtures`: inverse mean FDR of next 3 fixtures.
+- `expected_points`: function of xGI and PPG.
+- `predicted_points`: model’s next-GW prediction (capped/normalized).
+- `ownership_diff`: favors lower `selected_by_percent` for differential picks.
+- `value`: points-per-million proxy within budget.
+
+### Multi-Week Strategy (`reports/fpl_report/transfer_strategy.py`)
+
+`TransferStrategyPlanner.generate_strategy()` composes:
+
+- Multi-GW xP for the current squad via `predict_multiple_gws(..., 5)`.
+- Fixture swing detection: compares early vs late FDR averages and identifies “improving/worsening” runs.
+- Enhanced “immediate recommendations”: ranks swaps by 5-GW expected gain and assigns priority from expected gain + underperformance severity + swing alignment.
+- Transfer sequencing: a simple heuristic schedule (free transfers first; optional “consider” items).
+- Alternative strategies: conservative (1 move) vs aggressive (multiple moves with hit accounting).
+
+The report surfaces both EV deltas and the model performance metrics used to generate them.
+
+### Draft Optimizers (Wildcard + Free Hit)
+
+`WildcardOptimizer` (in `reports/fpl_report/transfer_strategy.py`) builds a 15-player wildcard draft:
+
+- Constraints: positional quotas (2/5/5/3), max 3 per club, budget cap, availability filter.
+- Scoring: weighted blend of season-long indicators (PPG, total points, minutes reliability, xGI, form) plus a small bonus from 5-GW model xP if provided.
+- Algorithm: greedy XI selection (default target 4-4-2, prioritized by position), then fills bench with cheapest valid players, then selects the best formation among standard FPL formations.
+
+`FreeHitOptimizer` builds a 15-player free hit draft optimized for a single GW:
+
+- Primary score: `ep_next` (FPL API expected points next round), with a form/PPG fallback if missing.
+- League-aware differentials: optional differential bonus `diff_bonus * (1 - league_ownership)^2` based on sampled squads (from `compute_league_ownership()` in `reports/fpl_report/data_fetcher.py`).
+- Strategy knob: `--free-hit-strategy safe|balanced|aggressive` controls the differential bonus magnitude (currently used) and declares a max differential count (currently not enforced).
+
+### Rendering Pipeline (Plots → LaTeX → PDF)
+
+Plots are generated by `PlotGenerator` (`reports/fpl_report/plot_generator.py`) into `reports/plots/` and then referenced from LaTeX:
+
+- Standard: points per GW, contribution heatmap, contribution treemap, transfer matrix, hindsight fixture analysis.
+- Competitive: points/rank progression and per-team treemaps.
+- Free Hit: per-GW comparison plot for the next 5 GWs (built from model predictions for apples-to-apples comparison).
+
+LaTeX sections are assembled by `LaTeXReportGenerator` (`reports/fpl_report/latex_generator.py`):
+
+- Core sections: title page, season summary, GW performance charts, formation diagram, player deep dives.
+- Strategy sections: transfer recommendations, multi-week strategy, chip strategy, insights.
+- Optional sections: competitive analysis, wildcard draft, free hit draft.
+
+## CLI Reference (Advanced)
+
+The underlying CLI is `python reports/generate_fpl_report.py`:
+
+- Required: `--team <TEAM_ID>`
+- Common: `--gw <N>`, `--season <YYYY-YY>`, `--no-pdf`, `--output report.tex`, `--verbose`
+- Caching: `--no-cache`, `--clear-cache`, `--cache-stats`
+- Competitive: `--compare <id...>`, `--no-competitive`
+- Free Hit: `--league-id <classic_league_id>`, `--league-sample <N>`, `--free-hit-gw <N>`, `--free-hit-strategy safe|balanced|aggressive`
+
+## Development & Testing
+
+- Run tests: `python -m unittest discover -s tests -v`
+- Refresh current-season dataset (writes to `data/<season>/`): `python global_scraper.py`
+- Merge multi-season data exports: `python global_merger.py`
+- Download your team’s raw data snapshot: `python teams_scraper.py <team_id>`
+
+If report generation fails due to missing scientific/plotting dependencies, install the report stack into the active `venv` (at minimum: `scipy`, `scikit-learn`, `matplotlib`, `seaborn`, `squarify`).
+
+## Dataset Notes (Optional)
+
+`data/<season>/` is structured as:
+
+- `cleaned_players.csv`: season overview
+- `gws/gw<number>.csv`: gameweek-level rows
+- `gws/merged_gw.csv`: all GWs merged
+- `players/<player_name>/gws.csv`: per-player GW history
+- `players/<player_name>/history.csv`: prior-season history
+
+### Citing the Dataset
+
+```bibtex
 @misc{anand2016fantasypremierleague,
   title = {{FPL Historical Dataset}},
   author = {Anand, Vaastav},
   year = {2022},
-  howpublished = {Retrieved August 2022 from \url{https://github.com/vaastav/Fantasy-Premier-League/}}
+  howpublished = {Retrieved August 2022 from \\url{https://github.com/vaastav/Fantasy-Premier-League/}}
 }
 ```
-
-
-### Acknowledgement
-
-+ rin-hairie for adding master team lists and merge scripts
-+ ergest for adding merged_gw.csv files for 2016-17 and 2017-18 seasons
-+ BDooley11 for providing top managers script
-+ speeder1987 for providing 2018/19 fixtures.csv file
-+ ravgeetdhillon for github actions automation for data update
-+ kz4killua for fixing GW37 data for the 21-22 season
-+ SaintJuniper for id-dictionary update for the 21-22 season
-
-## FAQ
-
-### Data Structure
-
-The data folder contains the data from past seasons as well as the current season. It is structured as follows:
-
-+ season/cleaned_players.csv : The overview stats for the season
-+ season/gws/gw_number.csv : GW-specific stats for the particular season
-+ season/gws/merged_gws.csv : GW-by-GW stats for each player in a single file
-+ season/players/player_name/gws.csv : GW-by-GW stats for that specific player
-+ season/players/player_name/history.csv : Prior seasons history stats for that specific player.
-
-### Accessing the Data Directly in Python
-
-You can access data files within this repository programmatically using Python and the `pandas` library. Below is an example using the `data/2023-24/gws/merged_gw.csv` file. Similar methods can be applied to other data files in the repository. Note this is using the raw URL for direct file access, bypassing the GitHub UI.
-
-```python
-import pandas as pd
-
-# URL of the CSV file (example)
-url = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data/2023-24/gws/merged_gw.csv"
-
-# Read the CSV file into a pandas DataFrame
-df = pd.read_csv(url)
-```
-
-### Player Position Data
-
-In players_raw.csv, element_type is the field that corresponds to the position.
-1 = GK
-2 = DEF
-3 = MID
-4 = FWD
-
-### Errata
-
-+ GW35 expected points data is wrong (all values are 0).
-
-### Contributing
-
-+ If you feel like there is some data that is missing which you would like to see, then please feel free to create a PR or create an issue highlighting what is missing and what you would like to be added
-+ If you have access to old data (pre-2016) then please feel free to create Pull Requests adding the data to the repo or create an issue with links to old data and I will add them myself.
-
-### Using
-
-If you use data from here for your website or blog posts, then I would humbly request that you please add a link back to this repo as the data source (and I would in turn add a link to your post/site as a notable usage of this repo).
-
-## Downloading Your Team Data
-
-You can download the data for your team by executing the following steps:
-
-```
-python teams_scraper.py <team_id>
-#Eg: python teams_scraper.py 4582
-```
-
-This will create a new folder called "team_<team_id>_data18-19" with individual files of all the important data
-
-# Notable Usages of this Repository
-
-+ [Picking the Ultimate Fantasy Premier League Team with ArcticDB by Matthew Simpson](https://medium.com/arcticdb/picking-the-ultimate-fantasy-premier-league-team-with-arcticdb-4ae31ff5d817)
-
-+ [Analysing Fantasy Premier League data in R Course by Arif P. Sulistiono](https://github.com/arifpras/BelutListrik)
-
-+ [Point Predictor via Random Forests by Francesco Barbara](https://github.com/francescobarbara/FPL-point-predictor-via-random-forests)
-
-+ [Money (Foot)Ball – how will our virtual football team selected entirely by Machine Learning compete in the big leagues?](https://www.dtsquared.co.uk/money-football-how-will-our-virtual-football-team-selected-entirely-by-machine-learning-compete-in-the-big-leagues/)
-
-+ [An introduction to SQL using FPL data by Liam Connors](https://towardsdatascience.com/an-introduction-to-sql-using-fpl-data-8314ec982308)
-
-+ [Hindsight Optimization for FPL by Sertalp B. Cay](https://alpscode.com/blog/hindsight-optimization/)
-
-+ [Data Science to get top 1% on return to FPL by James Asher](https://medium.com/the-sports-scientist/how-i-used-data-science-to-get-into-the-top-1-on-the-return-to-fantasy-premier-league-98829d4f65e5)
-
-+ [FPLDASH: A customizable Fantasy Premier League Dashboard by Jin Hyun Cheong](http://www.fpldash.com)
-
-+ [How to win at Fantasy Football with Splunk and Machine Learning by Rupert Truman](https://www.splunk.com/en_us/blog/machine-learning/how-to-win-at-fantasy-football-with-splunk-and-machine-learning-part-1.html)
-
-+ [2019-20 Winner Joshua Bull's Oxford Maths Public Lecture](https://www.youtube.com/watch?v=LzEuweGrHvc)
-
-+ [2019-20 Lottery Analysis by @theFPLKiwi](https://twitter.com/theFPLkiwi/status/1297619700206239746?s=20)
-
-+ [Fantasy Nutmeg Website by code247](https://www.fantasynutmeg.com/history)
-
-+ [Fantasy Premier League 19/20, a review by Hersh Dhillon](https://medium.com/@2017csb1079/fantasy-premier-league-19-20-a-review-part-1-basics-167e610e229)
-
-+ [Visualisasi Data: Fantasy Premier League 19/20 by Erwindra Rusli](https://medium.com/@erwindrarusli/visualisasi-data-fantasy-premier-league-19-20-a80aaf097a21)
-
-+ [Machine Learning Model by pratz](https://keytodatascience.com/fpl-machine-learning/)
-
-+ [xA vs xG for Attacking Midfielders/Forwards by u/JLane1996](https://www.reddit.com/r/FantasyPL/comments/erfdy1/a_plot_of_xg_vs_xa_for_for_attacking_midsforwards/)
-
-+ [Expected Goals vs Actual Goals for Manchester United by u/JLane1996](https://www.reddit.com/r/reddevils/comments/ecbn9j/corrected_plot_of_goals_vs_expected_goals_this/fba8vs3/)
-
-+ [Tableau Viz by u/richkelana](https://www.reddit.com/r/tableau/comments/e2j0uq/my_first_tableu_viz_fpl/)
-
-+ [Top Players against GW13 rival by u/LiuSiuMing](https://www.reddit.com/r/FantasyPL/comments/dz04hf/top_players_against_gw13_rival/)
-
-+ [Captaincy Choice GW4 2019-20 post by Matthew Barnfield](https://mbarnfield.github.io/fpl.html)
-
-+ [Building a dataset for Fantasy Premier League analysis by djfinnoy](http://www.didjfin.no/blog/fpl/fantasy-premier-league-data/)
-
-+ [Value in FPL 2019-20 Report by Who Got The Assist?](https://whogottheassist.com/value-in-fpl-2019-20-report/)
-
-+ [Talisman Theory 2018-19 Report by Who Got The Assist?](https://whogottheassist.com/talisman-theory-part-one-2018-19-report/)
-
-+ [Historical Analyses in fplscrapR by Rasmus Chrisentsen](https://twitter.com/fplscrapR)
-
-+ [Linearly Optimising Fantasy Premier League Teams by Joseph O'Connor](https://medium.com/@joseph.m.oconnor.88/linearly-optimising-fantasy-premier-league-teams-3b76e9694877)
-
-+ [How to Win at Fantasy Premier league using Deep learning by Paul Solomon](https://medium.com/@sol.paul/how-to-win-at-fantasy-premier-league-using-data-part-1-forecasting-with-deep-learning-bf121f38643a)
-
-+ [graphql API by u/jeppews](https://api.better-fpl.com/graphql)
-
-+ [FPL modeling and prediction by @alsgregory](https://github.com/alsgregory/Fantasy-Football)
-
-+ [FPL.co.id Talismans by @FPL_COID](http://fpl.co.id/tools/talismans/)
-
-+ [Leicester City Brendan Rodgers Impact Analysis on twitter by @neilswmurrayFPL](https://twitter.com/neilswmurrayFPL/status/1147407501736009728)
-
-+ [Stat Analysis on twitter by @StatOnScout](https://twitter.com/StatOnScout)
-
-+ [Arsenal-Chelsea LinkedIn article by Velko Kamenov](https://www.linkedin.com/pulse/whoever-wins-2019-uefa-europe-league-final-still-ends-velko-kamenov/)
-
-+ [Form vs Fixture Medium article by JinHyunCheong](https://towardsdatascience.com/mythbusting-fantasy-premier-league-form-over-fixtures-eecf9022e834)
-
-+ [Visualization by u/dkattir](https://www.reddit.com/r/dataisbeautiful/comments/9zlx14/points_per_game_vs_predictability_after_12_weeks/)
-
-+ [Visualization by u/Dray11](https://www.reddit.com/r/FantasyPL/comments/9bjwra/created_a_very_crude_and_basic_comparison_chart/)
-
-+ [Visualization website by @antoniaelek](http://fantasy.elek.hr/)
-
-+ [FPL Captain Classifier by Raghunandh GS](https://medium.com/datacomics/building-an-fpl-captain-classifier-cf4ee343ebcc)
-
-+ [My Personal Blog](http://vaastavanand.com/blog/)
-
-+ [FPL.zoid.dev - Query FPL data with SQL in your browser](https://fpl.zoid.dev)
-
-+ [Premier League Table by FPL Points by Edward F](https://fpl-pl-table.streamlit.app/)
-
-+ [FPL Manager Medals by Edward F](https://fpl-manager-medals.streamlit.app/)
-
-+ [SiegFPL by @infinitetrooper](https://fpl.infinitetrooper.com/)

@@ -125,6 +125,54 @@ def get_fixtures_data():
     data = json.loads(response.text)
     return data
 
+def get_classic_league_standings(league_id, page=1):
+    """ Retrieve classic league standings with pagination support
+
+    Args:
+        league_id (int): ID of the classic league
+        page (int): Page number (1-indexed), each page returns up to 50 entries
+
+    Returns:
+        dict: League info and standings data including:
+            - league: {id, name, ...}
+            - standings: {has_next, page, results: [{entry, player_name, entry_name, rank, total, ...}]}
+    """
+    base_url = "https://fantasy.premierleague.com/api/leagues-classic/"
+    full_url = f"{base_url}{league_id}/standings/?page_standings={page}"
+    response = ''
+    while response == '':
+        try:
+            response = requests.get(full_url)
+        except:
+            time.sleep(5)
+    if response.status_code != 200:
+        raise Exception("Response was code " + str(response.status_code))
+    data = json.loads(response.text)
+    return data
+
+def get_entry_picks_for_gw(entry_id, gw):
+    """ Retrieve picks for a specific entry and gameweek
+
+    Args:
+        entry_id (int): ID of the team
+        gw (int): Gameweek number
+
+    Returns:
+        dict: Picks data including picks list, entry_history, active_chip
+    """
+    base_url = "https://fantasy.premierleague.com/api/entry/"
+    full_url = f"{base_url}{entry_id}/event/{gw}/picks/"
+    response = ''
+    while response == '':
+        try:
+            response = requests.get(full_url)
+        except:
+            time.sleep(5)
+    if response.status_code != 200:
+        raise Exception("Response was code " + str(response.status_code))
+    data = json.loads(response.text)
+    return data
+
 def main():
     data = get_data()
     with open('raw.json', 'w') as outf:

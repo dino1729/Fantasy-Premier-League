@@ -1,0 +1,1302 @@
+\documentclass[11pt,a4paper]{article}
+\pdfpageattr{/Rotate 0}
+
+% Packages
+\usepackage[margin=2cm, portrait]{geometry}
+
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shadows}
+\usepackage{pgfplots}
+\usepackage{pgf-pie}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{colortbl}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{fontawesome5}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{setspace}
+\usepackage{multicol}
+\usepackage[normalem]{ulem}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+
+% Color definitions (FPL colors)
+\definecolor{fplpurple}{RGB}{55,0,60}
+\definecolor{fplgreen}{RGB}{0,255,135}
+\definecolor{fplpink}{RGB}{255,47,130}
+\definecolor{fpldark}{RGB}{28,28,30}
+\definecolor{fplgray}{RGB}{128,128,128}
+\definecolor{gold}{RGB}{255,215,0}
+\definecolor{silver}{RGB}{192,192,192}
+\definecolor{bronze}{RGB}{205,127,50}
+\definecolor{rising}{RGB}{0,200,83}
+\definecolor{falling}{RGB}{255,82,82}
+\definecolor{stable}{RGB}{255,193,7}
+
+% PGFPlots settings
+\pgfplotsset{compat=1.18}
+
+% Title formatting
+\titleformat{\section}{\Large\bfseries\color{fplpurple}}{}{0em}{}[\color{fplgreen}\titlerule]
+\titleformat{\subsection}{\large\bfseries\color{fpldark}}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{fplpurple}}{}{0em}{}
+
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textcolor{fplpurple}{\textbf{FC Arthashastra}}}
+\fancyhead[R]{\textcolor{fplgray}{Season 2025-26 | GW16}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{2pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{fplgreen}\leaders\hrule height \headrulewidth\hfill}}
+\setlength{\headheight}{14pt}
+
+\begin{document}
+
+
+% Title Page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries\color{fplpurple} Fantasy Premier League}\\[0.5cm]
+    {\LARGE\color{fplgreen} Season Report 2025-26}\\[2cm]
+
+    \begin{tikzpicture}
+        \fill[fplpurple] (0,0) circle (3cm);
+        \node[white,font=\Huge\bfseries] at (0,0.5) {FC};
+        \node[fplgreen,font=\large\bfseries] at (0,-0.5) {Arthashastra};
+    \end{tikzpicture}
+
+    \vspace{2cm}
+
+    {\Large\color{fpldark} Manager: \textbf{Dinesh Katam}}\\[0.5cm]
+    {\large\color{fplgray} Gameweek 16 Report}\\[2cm]
+
+    \begin{tikzpicture}
+        \node[draw=fplpurple,line width=2pt,rounded corners=10pt,inner sep=15pt,fill=fplpurple!5] {
+            \begin{tabular}{ccc}
+                \textcolor{fplpurple}{\Large\textbf{820}} & \textcolor{fplpurple}{\Large\textbf{4,985,009}} & \textcolor{fplpurple}{\Large\textbf{GW16}}\\
+                \textcolor{fplgray}{Total Points} & \textcolor{fplgray}{Overall Rank} & \textcolor{fplgray}{Current GW}
+            \end{tabular}
+        };
+    \end{tikzpicture}
+
+    \vfill
+    {\small\color{fplgray} Report Generated: December 2025}
+\end{titlepage}
+
+
+% Season Summary
+\newpage
+\section{Season Summary}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=5pt,inner sep=12pt,fill=fplgreen!10] {
+        \begin{tabular}{cccc}
+            \textcolor{fplpurple}{\LARGE\textbf{820}} &
+            \textcolor{fplpurple}{\LARGE\textbf{4,985,009}} &
+            \textcolor{fplpurple}{\LARGE\textbf{1,776,374}} &
+            \textcolor{fplpurple}{\LARGE\textbf{16}}\\[3pt]
+            \textcolor{fpldark}{Total Points} &
+            \textcolor{fpldark}{Current Rank} &
+            \textcolor{fpldark}{Best Rank} &
+            \textcolor{fpldark}{GWs Played}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+\vspace{0.5cm}
+
+\subsection{Key Statistics}
+
+\begin{tabularx}{\textwidth}{X|X}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Points per Gameweek (Average) & 51.2 \\
+Best Gameweek Score & 80 (GW4) \\
+Worst Gameweek Score & 29 (GW2) \\
+Best Overall Rank & 1,776,374 \\
+Total Points on Bench & 107 \\
+Average Bench Points & 6.7 \\
+Squad Value & \pounds98.4m \\
+Bank Balance & \pounds0.0m \\
+\midrule
+\textbf{Transfers Made} & 0 \\
+\textbf{Transfer Hits} & -0 points \\
+\textbf{Free Transfers} & 5 \\
+\textbf{Chips Available} & 5/5 \\
+\textbf{Chips Used} & None used \\
+\bottomrule
+\end{tabularx}
+
+
+% Gameweek Performance Chart (Image)
+\newpage
+\section{Gameweek Performance}
+\subsection{Points per Gameweek}
+\begin{center}
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/points_per_gw.png}
+\end{center}
+
+
+\subsection{Overall Rank Progression}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+    width=\textwidth,
+    height=7cm,
+    xlabel={Gameweek},
+    ylabel={Overall Rank (millions)},
+    ymin=0,
+    ymax=8.0,
+    y dir=reverse,
+    xtick={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16},
+    grid=major,
+    grid style={dashed,gray!30},
+    mark=*,
+    mark options={fill=fplgreen,draw=fplpurple},
+    line width=2pt,
+    color=fplpurple,
+]
+\addplot coordinates {
+    (1,2.15) (2,7.01) (3,5.84) (4,3.33) (5,1.78) (6,2.44) (7,4.70) (8,5.25) (9,5.08) (10,5.26) (11,5.38) (12,5.60) (13,5.30) (14,5.08) (15,5.20) (16,4.99)
+};
+\node[pin={[pin edge={fplgreen,thick}]90:\textcolor{fplgreen}{\textbf{Best: 1.78M}}}] at (axis cs:5,1.78) {};
+\end{axis}
+\end{tikzpicture}
+\end{center}
+
+
+% Player Points Breakdown (Treemap)
+\subsection{Points per Player Distribution}
+\begin{center}
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/points_treemap.png}
+\end{center}
+
+
+% Player Contribution Heatmap
+\newpage
+\section{Player Contribution Analysis}
+\begin{center}
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/player_contribution.png}
+\end{center}
+
+
+% Hindsight Fixture Analysis
+\subsection{Hindsight Fixture Analysis}
+
+\textit{This analysis shows fixture difficulty (with opponents) alongside actual points scored.
+Use it to evaluate how well fixture difficulty predicted performance and identify which players
+over/under-performed relative to their schedule.}
+
+\begin{center}
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/hindsight_fixture_analysis.png}
+\end{center}
+
+
+% Position Points Breakdown
+\subsection{Points by Position}
+
+\begin{center}
+\begin{minipage}{0.45\textwidth}
+\begin{tikzpicture}
+\pie[
+    text=legend,
+    radius=2.5,
+    color={fplpurple!60, blue!50, fplgreen!60, fplpink!60},
+    explode={0.05, 0.05, 0.05, 0.05}
+]{
+    5.0/GKP,
+    22.0/DEF,
+    39.1/MID,
+    33.9/FWD
+}
+\end{tikzpicture}
+\end{minipage}
+\hfill
+\begin{minipage}{0.45\textwidth}
+\begin{tabular}{l|r|r}
+\toprule
+\textbf{Position} & \textbf{Points} & \textbf{Share} \\
+\midrule
+Goalkeeper & 41 & 5.0\% \\Defenders & 180 & 22.0\% \\Midfielders & 321 & 39.1\% \\Forwards & 278 & 33.9\% \\
+\midrule
+\textbf{Total} & \textbf{820} & \textbf{100\%} \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\end{center}
+
+
+% Current Squad
+\newpage
+\section{Current Squad (GW16)}
+
+\begin{center}
+\begin{tikzpicture}[
+    player/.style={draw=fplpurple,rounded corners=5pt,fill=white,minimum width=2.2cm,minimum height=0.8cm,font=\small,drop shadow={shadow xshift=0.5pt,shadow yshift=-0.5pt,opacity=0.3}},
+    captain/.style={player,fill=fplgreen!40,line width=2pt,draw=fplpurple},
+    vice/.style={player,fill=yellow!30,line width=1.5pt},
+    bench/.style={draw=gray,rounded corners=5pt,fill=gray!15,minimum width=2cm,minimum height=0.7cm,font=\small}
+]
+
+% Pitch background
+\fill[green!30] (-6,-1) rectangle (6,10);
+\fill[green!25] (-6,4.5) rectangle (6,10);
+
+% Pitch markings
+\draw[white,line width=3pt] (-6,4.5) -- (6,4.5);
+\draw[white,line width=2pt] (0,4.5) circle (1.2);
+\fill[white] (0,4.5) circle (0.1);
+\draw[white,line width=2pt] (-3,10) -- (-3,8) -- (3,8) -- (3,10);
+\draw[white,line width=1.5pt] (-1.5,10) -- (-1.5,9) -- (1.5,9) -- (1.5,10);
+\draw[white,line width=2pt] (-3,-1) -- (-3,1) -- (3,1) -- (3,-1);
+
+% Formation label
+\node[font=\Large\bfseries,color=fplpurple,fill=white,rounded corners=3pt,inner sep=5pt] at (0,9.3) {4-5-1};
+
+% Players
+\node[captain] at (0,7.8) {\textbf{Haaland (C)}};
+\node[player] at (-4.2,5.8) {Wirtz};
+\node[player] at (-1.8,5.5) {B.Fernandes};
+\node[player] at (0,5.5) {Reijnders};
+\node[player] at (1.8,5.5) {Anderson};
+\node[vice] at (4.2,5.8) {M.Salah (VC)};
+\node[player] at (-4,2.3) {Wan-Bissaka};
+\node[player] at (-1.5,2.3) {Van de Ven};
+\node[player] at (1.5,2.3) {Virgil};
+\node[player] at (4,2.3) {Estève};
+\node[player,fill=fplpurple!15] at (0,0.3) {Dúbravka};
+
+% Bench
+\fill[gray!10] (-5.5,-2) rectangle (5.5,-3.5);
+\draw[gray,line width=1pt] (-5.5,-2) rectangle (5.5,-3.5);
+\node[font=\bfseries,color=fplgray] at (0,-2.3) {SUBSTITUTES};
+\node[bench] at (-4,-3) {Sels};
+\node[bench] at (-1.5,-3) {Marc Guiu};
+\node[bench] at (1.5,-3) {Füllkrug};
+\node[bench] at (4,-3) {Konsa};
+
+\end{tikzpicture}
+\end{center}
+
+\newpage
+\section{Player Deep Dive Analysis}
+
+\small
+
+This section provides comprehensive metrics for each player in your squad, organized by position.
+The table includes performance stats, expected metrics, ICT analysis, and peer comparisons.
+
+\vspace{0.3cm}
+
+\subsection{Goalkeepers}
+
+{\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|l|r|r|r|r|c|r|r|r|c|c|c}
+\toprule
+\textbf{Player} & \textbf{Team} & \textbf{Price} & \textbf{Own\%} & \textbf{Pts} & \textbf{PPG} & \textbf{Form} & \textbf{Mins} & \textbf{Bonus} & \textbf{ICT} & \textbf{xG (vs Act)} & \textbf{xA (vs Act)} & \textbf{Peer\%} \\
+\midrule
+
+Dúbravka & BUR & \pounds4.0m & 33.5\% & 46 & 2.7 & \textcolor{stable}{$\rightarrow$} 1.8 & 1530 & 2 & 44.8 & 0.0 (-) & 0.0 (-) & \cellcolor{gold!30}67\% \\
+
+Sels & NFO & \pounds4.7m & 6.3\% & 40 & 2.7 & \textcolor{falling}{$\downarrow$} 2.0 & 1350 & 0 & 36.4 & 0.0 (-) & 0.1 (-) & \cellcolor{gold!30}60\% \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+\vspace{0.5cm}
+
+\subsection{Defenders}
+
+{\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|l|r|r|r|r|c|r|r|r|c|c|c}
+\toprule
+\textbf{Player} & \textbf{Team} & \textbf{Price} & \textbf{Own\%} & \textbf{Pts} & \textbf{PPG} & \textbf{Form} & \textbf{Mins} & \textbf{Bonus} & \textbf{ICT} & \textbf{xG (vs Act)} & \textbf{xA (vs Act)} & \textbf{Peer\%} \\
+\midrule
+
+Wan-Bissaka & WHU & \pounds4.2m & 4.6\% & 25 & 2.1 & \textcolor{stable}{$\rightarrow$} 1.8 & 1011 & 0 & 38.7 & 0.0 (-) & 0.5 (\textcolor{fplgreen}{+0.5}) & \cellcolor{gold!30}53\% \\
+
+Van de Ven & TOT & \pounds4.6m & 27.6\% & 65 & 4.1 & \textcolor{stable}{$\rightarrow$} 1.4 & 1429 & 5 & 50.8 & 2.0 (\textcolor{fplgreen}{+1.0}) & 0.3 (\textcolor{fplpink}{-0.3}) & \cellcolor{gold!30}67\% \\
+
+Virgil & LIV & \pounds5.9m & 23.6\% & 64 & 3.8 & \textcolor{falling}{$\downarrow$} 4.0 & 1530 & 4 & 70.5 & 0.8 (\textcolor{fplpink}{-0.8}) & 0.3 (\textcolor{fplpink}{-0.3}) & \cellcolor{fplgreen!30}88\% \\
+
+Estève & BUR & \pounds3.9m & 11.4\% & 42 & 2.6 & \textcolor{falling}{$\downarrow$} 2.2 & 1432 & 0 & 47.0 & 0.4 (\textcolor{fplpink}{-0.4}) & 0.4 (\textcolor{fplpink}{-0.4}) & \cellcolor{gold!30}65\% \\
+
+Konsa & AVL & \pounds4.4m & 7.7\% & 47 & 3.1 & \textcolor{falling}{$\downarrow$} 2.4 & 1325 & 2 & 37.7 & 0.3 (\textcolor{fplpink}{-0.3}) & 0.2 (\textcolor{fplpink}{-0.2}) & \cellcolor{gold!30}64\% \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+\vspace{0.5cm}
+
+\subsection{Midfielders}
+
+{\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|l|r|r|r|r|c|r|r|r|c|c|c}
+\toprule
+\textbf{Player} & \textbf{Team} & \textbf{Price} & \textbf{Own\%} & \textbf{Pts} & \textbf{PPG} & \textbf{Form} & \textbf{Mins} & \textbf{Bonus} & \textbf{ICT} & \textbf{xG (vs Act)} & \textbf{xA (vs Act)} & \textbf{Peer\%} \\
+\midrule
+
+Wirtz & LIV & \pounds8.0m & 7.0\% & 45 & 2.8 & \textcolor{rising}{$\uparrow$} 5.2 & 1084 & 5 & 79.8 & 2.2 (\textcolor{fplpink}{-2.2}) & 1.9 (\textcolor{fplgreen}{+0.1}) & \cellcolor{fplgreen!30}81\% \\
+
+B.Fernandes & MUN & \pounds9.3m & 30.8\% & 98 & 6.1 & \textcolor{falling}{$\downarrow$} 9.2 & 1430 & 17 & 164.1 & 6.9 (\textcolor{fplpink}{-1.9}) & 4.0 (\textcolor{fplgreen}{+3.0}) & \cellcolor{fplgreen!30}100\% \\
+
+Reijnders & MCI & \pounds5.2m & 11.7\% & 57 & 3.6 & \textcolor{rising}{$\uparrow$} 4.4 & 1096 & 3 & 73.0 & 2.9 (\textcolor{fplgreen}{+0.1}) & 1.4 (\textcolor{fplgreen}{+0.6}) & \cellcolor{fplgreen!30}82\% \\
+
+Anderson & NFO & \pounds5.4m & 4.9\% & 65 & 4.1 & \textcolor{falling}{$\downarrow$} 3.0 & 1440 & 4 & 94.6 & 1.8 (\textcolor{fplpink}{-0.8}) & 1.7 (\textcolor{fplgreen}{+0.3}) & \cellcolor{fplgreen!30}88\% \\
+
+M.Salah & LIV & \pounds14.0m & 15.5\% & 64 & 4.6 & \textcolor{rising}{$\uparrow$} 1.6 & 1183 & 5 & 114.6 & 4.7 (\textcolor{fplpink}{-0.7}) & 2.4 (\textcolor{fplgreen}{+0.6}) & \cellcolor{fplgreen!30}76\% \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+\vspace{0.5cm}
+
+\subsection{Forwards}
+
+{\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|l|r|r|r|r|c|r|r|r|c|c|c}
+\toprule
+\textbf{Player} & \textbf{Team} & \textbf{Price} & \textbf{Own\%} & \textbf{Pts} & \textbf{PPG} & \textbf{Form} & \textbf{Mins} & \textbf{Bonus} & \textbf{ICT} & \textbf{xG (vs Act)} & \textbf{xA (vs Act)} & \textbf{Peer\%} \\
+\midrule
+
+Haaland & MCI & \pounds15.0m & 73.9\% & 151 & 8.9 & \textcolor{rising}{$\uparrow$} 9.4 & 1462 & 31 & 177.9 & 16.0 (\textcolor{fplgreen}{+3.0}) & 1.1 (\textcolor{fplgreen}{+2.9}) & \cellcolor{fplgreen!30}100\% \\
+
+Marc Guiu & CHE & \pounds4.2m & 8.1\% & 12 & 1.3 & \textcolor{stable}{$\rightarrow$} 0.2 & 247 & 0 & 12.6 & 1.5 (\textcolor{fplpink}{-1.5}) & 0.3 (\textcolor{fplgreen}{+0.7}) & \cellcolor{fplpink!30}16\% \\
+
+Füllkrug & WHU & \pounds5.6m & 0.6\% & 12 & 1.5 & \textcolor{stable}{$\rightarrow$} 0.2 & 407 & 0 & 23.8 & 0.9 (\textcolor{fplpink}{-0.9}) & 0.2 (\textcolor{fplpink}{-0.2}) & \cellcolor{fplpink!30}19\% \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+\vspace{0.5cm}
+
+
+\newpage
+\section{Transfer History}
+\textit{No transfers made this season.}
+
+\newpage
+\section{Transfer Strategy \& Planning Horizon}
+
+\subsection{Expected Value Analysis (Next 5 GWs)}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=15pt,fill=fplgreen!10] {
+        \begin{tabular}{ccc}
+            \textcolor{fplpurple}{\LARGE\textbf{197.4}} &
+            \textcolor{fplpurple}{\LARGE\textbf{243.4}} &
+            \textcolor{fplgreen}{\LARGE\textbf{+46.0}}\\[3pt]
+            \textcolor{fpldark}{Current Squad xP} &
+            \textcolor{fpldark}{Optimized xP} &
+            \textcolor{fpldark}{Potential Gain}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+\subsection{Fixture Difficulty Heatmap (GW17-21)}
+
+\begin{center}
+\small
+\begin{tabular}{l|l|ccccc|r}
+\toprule
+\textbf{Player} & \textbf{Swing} & \textbf{GW17} & \textbf{GW18} & \textbf{GW19} & \textbf{GW20} & \textbf{GW21} & \textbf{5-GW xP} \\
+\midrule
+
+Dúbravka & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!25}\shortstack{EVE(H)\\{\tiny 49\%}} & \cellcolor{gold!40}\shortstack{NEW(H)\\{\tiny 38\%}} & \cellcolor{orange!40}\shortstack{BHA(A)\\{\tiny 23\%}} & \cellcolor{gold!40}\shortstack{MUN(H)\\{\tiny 42\%}} & \cellcolor{orange!40}\shortstack{LIV(A)\\{\tiny 20\%}} & 12.2 \\
+Sels & \textcolor{stable}{$\rightarrow$} & \cellcolor{fplpink!40}\shortstack{MCI(H)\\{\tiny 11\%}} & \cellcolor{orange!40}\shortstack{EVE(H)\\{\tiny 26\%}} & \cellcolor{fplpink!40}\shortstack{AVL(A)\\{\tiny 9\%}} & \cellcolor{orange!40}\shortstack{WHU(A)\\{\tiny 20\%}} & \cellcolor{fplpink!40}\shortstack{ARS(H)\\{\tiny 9\%}} & 5.2 \\
+Wan-Bissaka & \textcolor{stable}{$\rightarrow$} & \cellcolor{fplgreen!50}\shortstack{FUL(H)\\{\tiny 62\%}} & \cellcolor{orange!40}\shortstack{BHA(H)\\{\tiny 28\%}} & \cellcolor{gold!40}\shortstack{WOL(A)\\{\tiny 39\%}} & \cellcolor{fplgreen!50}\shortstack{NFO(H)\\{\tiny 63\%}} & \cellcolor{orange!40}\shortstack{TOT(A)\\{\tiny 24\%}} & 8.5 \\
+Van de Ven & \textcolor{rising}{$\uparrow$} & \cellcolor{orange!40}\shortstack{CRY(A)\\{\tiny 31\%}} & \cellcolor{orange!40}\shortstack{BRE(A)\\{\tiny 29\%}} & \cellcolor{fplgreen!50}\shortstack{SUN(H)\\{\tiny 76\%}} & \cellcolor{orange!40}\shortstack{BOU(A)\\{\tiny 32\%}} & \cellcolor{fplgreen!25}\shortstack{WHU(H)\\{\tiny 56\%}} & 14.2 \\
+Virgil & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!50}\shortstack{WOL(H)\\{\tiny 79\%}} & \cellcolor{fplgreen!50}\shortstack{LEE(H)\\{\tiny 82\%}} & \cellcolor{fplgreen!50}\shortstack{FUL(A)\\{\tiny 71\%}} & \cellcolor{orange!40}\shortstack{ARS(A)\\{\tiny 22\%}} & \cellcolor{fplgreen!50}\shortstack{BUR(H)\\{\tiny 62\%}} & 23.9 \\
+Estève & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!25}\shortstack{EVE(H)\\{\tiny 49\%}} & \cellcolor{gold!40}\shortstack{NEW(H)\\{\tiny 38\%}} & \cellcolor{orange!40}\shortstack{BHA(A)\\{\tiny 23\%}} & \cellcolor{gold!40}\shortstack{MUN(H)\\{\tiny 42\%}} & \cellcolor{orange!40}\shortstack{LIV(A)\\{\tiny 20\%}} & 8.9 \\
+Konsa & \textcolor{rising}{$\uparrow$} & \cellcolor{gold!40}\shortstack{CHE(A)\\{\tiny 38\%}} & \cellcolor{orange!40}\shortstack{ARS(A)\\{\tiny 20\%}} & \cellcolor{fplgreen!50}\shortstack{NFO(H)\\{\tiny 81\%}} & \cellcolor{gold!40}\shortstack{CRY(A)\\{\tiny 43\%}} & \cellcolor{fplgreen!50}\shortstack{EVE(H)\\{\tiny 63\%}} & 10.2 \\
+Wirtz & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!50}\shortstack{WOL(H)\\{\tiny 79\%}} & \cellcolor{fplgreen!50}\shortstack{LEE(H)\\{\tiny 82\%}} & \cellcolor{fplgreen!50}\shortstack{FUL(A)\\{\tiny 71\%}} & \cellcolor{orange!40}\shortstack{ARS(A)\\{\tiny 22\%}} & \cellcolor{fplgreen!50}\shortstack{BUR(H)\\{\tiny 62\%}} & 20.2 \\
+B.Fernandes & \textcolor{falling}{$\downarrow$} & \cellcolor{gold!40}\shortstack{NEW(H)\\{\tiny 41\%}} & \cellcolor{fplgreen!50}\shortstack{WOL(H)\\{\tiny 68\%}} & \cellcolor{fplgreen!50}\shortstack{LEE(A)\\{\tiny 60\%}} & \cellcolor{orange!40}\shortstack{BUR(A)\\{\tiny 33\%}} & \cellcolor{orange!40}\shortstack{MCI(H)\\{\tiny 28\%}} & 10.4 \\
+Reijnders & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!50}\shortstack{NFO(A)\\{\tiny 77\%}} & \cellcolor{fplgreen!50}\shortstack{SUN(A)\\{\tiny 80\%}} & \cellcolor{fplgreen!50}\shortstack{CHE(H)\\{\tiny 65\%}} & \cellcolor{fplgreen!25}\shortstack{BHA(H)\\{\tiny 57\%}} & \cellcolor{fplgreen!25}\shortstack{MUN(A)\\{\tiny 50\%}} & 18.6 \\
+Anderson & \textcolor{stable}{$\rightarrow$} & \cellcolor{fplpink!40}\shortstack{MCI(H)\\{\tiny 11\%}} & \cellcolor{orange!40}\shortstack{EVE(H)\\{\tiny 26\%}} & \cellcolor{fplpink!40}\shortstack{AVL(A)\\{\tiny 9\%}} & \cellcolor{orange!40}\shortstack{WHU(A)\\{\tiny 20\%}} & \cellcolor{fplpink!40}\shortstack{ARS(H)\\{\tiny 9\%}} & 10.5 \\
+M.Salah & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!50}\shortstack{WOL(H)\\{\tiny 79\%}} & \cellcolor{fplgreen!50}\shortstack{LEE(H)\\{\tiny 82\%}} & \cellcolor{fplgreen!50}\shortstack{FUL(A)\\{\tiny 71\%}} & \cellcolor{orange!40}\shortstack{ARS(A)\\{\tiny 22\%}} & \cellcolor{fplgreen!50}\shortstack{BUR(H)\\{\tiny 62\%}} & 21.2 \\
+Haaland & \textcolor{falling}{$\downarrow$} & \cellcolor{fplgreen!50}\shortstack{NFO(A)\\{\tiny 77\%}} & \cellcolor{fplgreen!50}\shortstack{SUN(A)\\{\tiny 80\%}} & \cellcolor{fplgreen!50}\shortstack{CHE(H)\\{\tiny 65\%}} & \cellcolor{fplgreen!25}\shortstack{BHA(H)\\{\tiny 57\%}} & \cellcolor{fplgreen!25}\shortstack{MUN(A)\\{\tiny 50\%}} & 21.3 \\
+Marc Guiu & \textcolor{stable}{$\rightarrow$} & \cellcolor{gold!40}\shortstack{AVL(H)\\{\tiny 36\%}} & \cellcolor{fplgreen!25}\shortstack{BOU(H)\\{\tiny 50\%}} & \cellcolor{fplpink!40}\shortstack{MCI(A)\\{\tiny 18\%}} & \cellcolor{fplgreen!50}\shortstack{FUL(A)\\{\tiny 60\%}} & \cellcolor{fplgreen!25}\shortstack{BRE(H)\\{\tiny 46\%}} & 9.2 \\
+Füllkrug & \textcolor{stable}{$\rightarrow$} & \cellcolor{fplgreen!50}\shortstack{FUL(H)\\{\tiny 62\%}} & \cellcolor{orange!40}\shortstack{BHA(H)\\{\tiny 28\%}} & \cellcolor{gold!40}\shortstack{WOL(A)\\{\tiny 39\%}} & \cellcolor{fplgreen!50}\shortstack{NFO(H)\\{\tiny 63\%}} & \cellcolor{orange!40}\shortstack{TOT(A)\\{\tiny 24\%}} & 3.0 \\
+
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textit{\small Colors: \colorbox{fplgreen!40}{Easy (1-2)} \colorbox{gold!40}{Medium (3)} \colorbox{orange!40}{Hard (4)} \colorbox{fplpink!40}{Very Hard (5)}}
+
+\subsection{Optimal Transfer Plan (MIP Solver)}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=10pt,inner sep=15pt,fill=fplgreen!10] {
+        \begin{tabular}{cccc}
+            \textcolor{fplpurple}{\LARGE\textbf{243.4}} &
+            \textcolor{fplpurple}{\Large\textbf{6}} &
+            \textcolor{fplpink}{\Large\textbf{-4}} &
+            \textcolor{fplpurple}{\Large\textbf{\pounds0.1m}}\\[5pt]
+            \textcolor{fplgray}{\small Expected Points} &
+            \textcolor{fplgray}{\small Transfers} &
+            \textcolor{fplgray}{\small Hit Cost} &
+            \textcolor{fplgray}{\small Budget Remaining}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+\small\textit{Solved in 0.38s using Mixed-Integer Programming}
+
+\subsubsection*{Recommended Transfers}
+
+\begin{center}
+\begin{tabular}{l|r|c|l|r}
+\toprule
+\textbf{OUT} & \textbf{Sell} & & \textbf{IN} & \textbf{Buy} \\
+\midrule
+
+\textcolor{fplpink}{Wan-Bissaka} & \pounds4.2m & $\rightarrow$ & \textcolor{fplgreen}{Verbruggen} & \pounds4.4m \\
+\textcolor{fplpink}{Van de Ven} & \pounds4.6m & $\rightarrow$ & \textcolor{fplgreen}{Tarkowski} & \pounds5.5m \\
+\textcolor{fplpink}{B.Fernandes} & \pounds9.3m & $\rightarrow$ & \textcolor{fplgreen}{O'Reilly} & \pounds5.3m \\
+\textcolor{fplpink}{Sels} & \pounds4.7m & $\rightarrow$ & \textcolor{fplgreen}{Cucurella} & \pounds6.2m \\
+\textcolor{fplpink}{Füllkrug} & \pounds5.6m & $\rightarrow$ & \textcolor{fplgreen}{Tavernier} & \pounds5.6m \\
+\textcolor{fplpink}{Konsa} & \pounds4.4m & $\rightarrow$ & \textcolor{fplgreen}{Calvert-Lewin} & \pounds5.7m \\
+
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Why These Moves?}
+\begin{tcolorbox}[colback=fplgreen!5,colframe=fplgreen!50,title=Transfer Analysis]
+\textbf{Wan-Bissaka $\rightarrow$ Verbruggen} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +7.6 xP over 5 GWs
+    \item Costs \pounds0.2m extra
+\end{itemize}
+\textbf{Van de Ven $\rightarrow$ Tarkowski} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +5.9 xP over 5 GWs
+    \item Costs \pounds0.9m extra
+\end{itemize}
+\textbf{B.Fernandes $\rightarrow$ O'Reilly} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +11.1 xP over 5 GWs
+    \item Saves \pounds4.0m
+\end{itemize}
+\textbf{Sels $\rightarrow$ Cucurella} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +16.7 xP over 5 GWs
+    \item Costs \pounds1.5m extra
+\end{itemize}
+\textbf{Füllkrug $\rightarrow$ Tavernier} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +15.6 xP over 5 GWs
+    \item Costs \pounds0.0m extra
+\end{itemize}
+\textbf{Konsa $\rightarrow$ Calvert-Lewin} \textcolor{fplgreen}{$\checkmark\checkmark$} \textit{Excellent}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item Expected gain: +11.8 xP over 5 GWs
+    \item Costs \pounds1.3m extra
+\end{itemize}
+\end{tcolorbox}
+\subsubsection*{Expected Points Timeline}
+\begin{center}
+\begin{tikzpicture}[
+    week/.style={draw=fplpurple,rounded corners=5pt,minimum width=2cm,minimum height=1.5cm,fill=white},
+    arrow/.style={->,thick,color=fplpurple}
+]
+\node[week,fill=fplgreen!20] at (0.0,0) {};
+\node[font=\scriptsize\bfseries,color=fplpurple] at (0.0,0.4) {GW17};
+\node[font=\large\bfseries,color=fplpurple] at (0.0,-0.1) {54.9};
+\draw[arrow] (1.1,0) -- (1.7,0);
+\node[week,fill=gold!20] at (2.8,0) {};
+\node[font=\scriptsize\bfseries,color=fplpurple] at (2.8,0.4) {GW18};
+\node[font=\large\bfseries,color=fplpurple] at (2.8,-0.1) {47.7};
+\draw[arrow] (3.9,0) -- (4.5,0);
+\node[week,fill=gold!20] at (5.6,0) {};
+\node[font=\scriptsize\bfseries,color=fplpurple] at (5.6,0.4) {GW19};
+\node[font=\large\bfseries,color=fplpurple] at (5.6,-0.1) {47.4};
+\draw[arrow] (6.699999999999999,0) -- (7.3,0);
+\node[week,fill=gold!20] at (8.399999999999999,0) {};
+\node[font=\scriptsize\bfseries,color=fplpurple] at (8.399999999999999,0.4) {GW20};
+\node[font=\large\bfseries,color=fplpurple] at (8.399999999999999,-0.1) {47.4};
+\draw[arrow] (9.499999999999998,0) -- (10.099999999999998,0);
+\node[week,fill=fplgreen!20] at (11.2,0) {};
+\node[font=\scriptsize\bfseries,color=fplpurple] at (11.2,0.4) {GW21};
+\node[font=\large\bfseries,color=fplpurple] at (11.2,-0.1) {50.0};
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\small
+\begin{tabular}{ccccc|c}
+\toprule
+\textbf{GW17} & \textbf{GW18} & \textbf{GW19} & \textbf{GW20} & \textbf{GW21} & \textbf{Total} \\
+\midrule
+54.9 & 47.7 & 47.4 & 47.4 & 50.0 & \textbf{247.4} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection*{Optimal Starting XI (Formation: 4-4-2)}
+
+\begin{center}
+\begin{tabular}{l|l|l|r}
+\toprule
+\textbf{Position} & \textbf{Player} & \textbf{Team} & \textbf{5-GW xP} \\
+\midrule
+
+GKP & Dúbravka & BUR & 12.2 \\
+DEF & \textbf{Virgil (C)} & LIV & 23.9 \\
+DEF & Cucurella & CHE & 21.9 \\
+DEF & O'Reilly & MCI & 21.5 \\
+DEF & Tarkowski & EVE & 20.1 \\
+MID & M.Salah & LIV & 21.2 \\
+MID & Wirtz & LIV & 20.2 \\
+MID & Reijnders & MCI & 18.6 \\
+MID & Tavernier & BOU & 18.6 \\
+FWD & Calvert-Lewin & LEE & 21.9 \\
+FWD & Haaland & MCI & 21.3 \\
+
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Captain Picks for Next GW}
+\begin{enumerate}
+\item \textbf{Haaland} (FWD) - Excellent form (9.4), Dream Team regular (8x)
+\item \textbf{B.Fernandes} (MID) - Excellent form (9.2), Dream Team regular (3x)
+\item \textbf{Wirtz} (MID) - High ICT (80)
+\end{enumerate}
+\newpage
+\section{Wildcard Draft (Current Budget)}
+
+\subsection{Expected Value Analysis (Next 5 GWs)}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplgreen!10] {
+        \begin{tabular}{ccc}
+            \textcolor{fplpurple}{\Large\textbf{197.4}} &
+            \textcolor{fplpurple}{\Large\textbf{229.4}} &
+            \textcolor{fplgreen}{\Large\textbf{+32.0}}\\[3pt]
+            \textcolor{fplgray}{Current Squad xP} &
+            \textcolor{fplgray}{Optimized xP} &
+            \textcolor{fplgray}{Potential Gain}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+
+\subsection{Budget Overview}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplpurple,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplpurple!5] {
+        \begin{tabular}{ccc}
+            \textcolor{fplpurple}{\Large\textbf{\pounds98.4m}} &
+            \textcolor{fplpurple}{\Large\textbf{\pounds98.2m}} &
+            \textcolor{fplgreen}{\Large\textbf{\pounds0.2m}}\\[3pt]
+            \textcolor{fplgray}{Total Budget} &
+            \textcolor{fplgray}{Spent} &
+            \textcolor{fplgray}{In The Bank}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+
+\subsection{Suggested Setup}
+
+\begin{center}
+\begin{tabular}{ll}
+\textbf{Formation:} & 4-4-2 \\
+\textbf{Captain:} & Ekitiké \\
+\textbf{Vice Captain:} & Cucurella \\
+\end{tabular}
+\end{center}
+
+\subsection{Starting XI}
+\textit{FDR colors: \colorbox{fplgreen!40}{Easy (1-2)} \colorbox{gold!40}{Medium (3)} \colorbox{orange!40}{Hard (4)} \colorbox{fplpink!40}{Very Hard (5)}}
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|c|c|r|r|r|r|ccccc}
+\toprule
+\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{PPG} & \textbf{5-GW xP} & \textbf{Score} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures (FDR)}} \\
+\midrule
+
+A.Becker & GKP & LIV & \pounds5.4m & 3.50 & 19.8 & 20.5 & \cellcolor{gold!40}TOT(a) & \cellcolor{fplgreen!40}WOL & \cellcolor{fplgreen!40}LEE & \cellcolor{gold!40}FUL(a) & \cellcolor{fplpink!40}ARS(a) \\
+Cucurella \textbf{(VC)} & DEF & CHE & \pounds6.2m & 4.10 & 21.9 & 23.6 & \cellcolor{orange!40}NEW(a) & \cellcolor{gold!40}AVL & \cellcolor{gold!40}BOU & \cellcolor{orange!40}MCI(a) & \cellcolor{gold!40}FUL(a) \\
+O'Reilly & DEF & MCI & \pounds5.3m & 4.60 & 21.5 & 22.3 & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+Mykolenko & DEF & EVE & \pounds4.9m & 2.90 & 20.7 & 21.4 & \cellcolor{orange!40}ARS & \cellcolor{fplgreen!40}BUR(a) & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}BRE & \cellcolor{fplgreen!40}WOL \\
+Thiaw & DEF & NEW & \pounds5.0m & 3.80 & 20.0 & 20.8 & \cellcolor{gold!40}CHE & \cellcolor{gold!40}MUN(a) & \cellcolor{fplgreen!40}BUR(a) & \cellcolor{gold!40}CRY & \cellcolor{fplgreen!40}LEE \\
+Saka & MID & ARS & \pounds10.3m & 5.20 & 19.4 & 25.5 & \cellcolor{gold!40}EVE(a) & \cellcolor{gold!40}BHA & \cellcolor{gold!40}AVL & \cellcolor{orange!40}BOU(a) & \cellcolor{orange!40}LIV \\
+Gordon & MID & NEW & \pounds7.3m & 3.30 & 21.3 & 23.1 & \cellcolor{gold!40}CHE & \cellcolor{gold!40}MUN(a) & \cellcolor{fplgreen!40}BUR(a) & \cellcolor{gold!40}CRY & \cellcolor{fplgreen!40}LEE \\
+Wirtz & MID & LIV & \pounds8.0m & 2.80 & 20.2 & 22.9 & \cellcolor{gold!40}TOT(a) & \cellcolor{fplgreen!40}WOL & \cellcolor{fplgreen!40}LEE & \cellcolor{gold!40}FUL(a) & \cellcolor{fplpink!40}ARS(a) \\
+N.Gonzalez & MID & MCI & \pounds5.9m & 2.90 & 20.2 & 20.8 & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+Haaland & FWD & MCI & \pounds15.0m & 8.90 & 21.3 & 31.0 & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+Ekitiké \textbf{(C)} & FWD & LIV & \pounds8.7m & 4.80 & 23.1 & 26.2 & \cellcolor{gold!40}TOT(a) & \cellcolor{fplgreen!40}WOL & \cellcolor{fplgreen!40}LEE & \cellcolor{gold!40}FUL(a) & \cellcolor{fplpink!40}ARS(a) \\
+
+\midrule
+\textbf{Total XI} & & & \textbf{\pounds82.0m} & & \textbf{229.4} & \textbf{258.2} & & & & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Bench}
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|c|c|r|r|r|ccccc}
+\toprule
+\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{5-GW xP} & \textbf{Score} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures}} \\
+\midrule
+
+Lecomte & GKP & FUL & \pounds3.9m & 0.0 & 0.0 & \cellcolor{fplgreen!40}NFO & \cellcolor{fplgreen!40}WHU(a) & \cellcolor{gold!40}CRY(a) & \cellcolor{orange!40}LIV & \cellcolor{gold!40}CHE \\
+Marc Guiu & FWD & CHE & \pounds4.2m & 0.0 & 1.7 & \cellcolor{orange!40}NEW(a) & \cellcolor{gold!40}AVL & \cellcolor{gold!40}BOU & \cellcolor{orange!40}MCI(a) & \cellcolor{gold!40}FUL(a) \\
+Amissah & DEF & FUL & \pounds3.8m & 0.0 & 0.0 & \cellcolor{fplgreen!40}NFO & \cellcolor{fplgreen!40}WHU(a) & \cellcolor{gold!40}CRY(a) & \cellcolor{orange!40}LIV & \cellcolor{gold!40}CHE \\
+Konak & MID & BRE & \pounds4.3m & 0.0 & 0.0 & \cellcolor{fplgreen!40}WOL(a) & \cellcolor{gold!40}BOU & \cellcolor{gold!40}TOT & \cellcolor{gold!40}EVE(a) & \cellcolor{fplgreen!40}SUN \\
+
+\midrule
+\textbf{Bench Total} & & & \textbf{\pounds16.2m} & \textbf{0.0} & & & & & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Full Squad by Position}
+
+\textbf{Goalkeepers} (2): A.Becker (\pounds5.4m), Lecomte (\pounds3.9m)\\
+\textit{Position spend: \pounds9.3m}
+
+
+
+\textbf{Defenders} (5): Cucurella (\pounds6.2m), O'Reilly (\pounds5.3m), Mykolenko (\pounds4.9m), Thiaw (\pounds5.0m), Amissah (\pounds3.8m)\\
+\textit{Position spend: \pounds25.2m}
+
+
+
+\textbf{Midfielders} (5): Saka (\pounds10.3m), Gordon (\pounds7.3m), Wirtz (\pounds8.0m), N.Gonzalez (\pounds5.9m), Konak (\pounds4.3m)\\
+\textit{Position spend: \pounds35.8m}
+
+
+
+\textbf{Forwards} (3): Haaland (\pounds15.0m), Ekitiké (\pounds8.7m), Marc Guiu (\pounds4.2m)\\
+\textit{Position spend: \pounds27.9m}
+
+
+
+\subsection{Strategy Notes}
+
+This Wildcard draft prioritizes \textbf{season-balanced} selection:
+\begin{itemize}
+    \item Players chosen based on long-term metrics (PPG, total points, minutes)
+    \item Cheap bench strategy to maximize starting XI quality
+    \item Fixtures are considered but don't dominate selection
+    \item All players are currently available (no injuries/suspensions)
+\end{itemize}
+
+\textit{Note: This is a suggested squad based on current data. Always verify player availability and news before activating your Wildcard.}
+
+\newpage
+\section{Free Hit Draft (GW18)}
+
+\subsection{Expected Value Analysis (1 GW)}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplgreen!10] {
+        \begin{tabular}{ccc}
+            \textcolor{fplpurple}{\Large\textbf{44.0}} &
+            \textcolor{fplpurple}{\Large\textbf{77.9}} &
+            \textcolor{fplgreen}{\Large\textbf{+33.9}}\\[3pt]
+            \textcolor{fplgray}{Current Squad xP} &
+            \textcolor{fplgray}{Optimized xP} &
+            \textcolor{fplgray}{Potential Gain}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+
+\subsection{When to Play Your Free Hit}
+\textit{Comparison of expected points over the next 5 gameweeks. Best GW to use Free Hit: \textbf{GW20}}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/free_hit_gw_analysis.png}
+\end{center}
+
+
+\subsection{Budget Overview}
+
+\begin{center}
+\begin{tikzpicture}
+    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplgreen!5] {
+        \begin{tabular}{ccc}
+            \textcolor{fplgreen}{\Large\textbf{\pounds98.4m}} &
+            \textcolor{fplgreen}{\Large\textbf{\pounds95.6m}} &
+            \textcolor{fplpurple}{\Large\textbf{\pounds2.8m}}\\[3pt]
+            \textcolor{fplgray}{Total Budget} &
+            \textcolor{fplgray}{Spent} &
+            \textcolor{fplgray}{In The Bank}
+        \end{tabular}
+    };
+\end{tikzpicture}
+\end{center}
+
+
+\subsection{Suggested Setup}
+
+\begin{center}
+\begin{tabular}{ll}
+\textbf{Target Gameweek:} & GW18 \\
+\textbf{Formation:} & 4-4-2 \\
+\textbf{Captain:} & Foden \\
+\textbf{Vice Captain:} & Calvert-Lewin \\
+\textbf{Strategy:} & Balanced \\
+\end{tabular}
+\end{center}
+
+\subsection{Starting XI}
+\textit{League ownership based on 4 teams. FDR colors: \colorbox{fplgreen!40}{Easy} \colorbox{gold!40}{Med} \colorbox{orange!40}{Hard} \colorbox{fplpink!40}{V.Hard}}
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|c|c|r|r|r|r|ccccc}
+\toprule
+\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{xPts} & \textbf{5-GW xP} & \textbf{Own\%} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures (FDR)}} \\
+\midrule
+
+Pickford & GKP & EVE & \pounds5.5m & 4.7 & 16.7 & 0\% & \cellcolor{orange!40}ARS & \cellcolor{fplgreen!40}BUR(a) & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}BRE & \cellcolor{fplgreen!40}WOL \\
+Rúben & DEF & MCI & \pounds5.7m & 6.5 & 19.5 & 0\% & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+Chalobah & DEF & CHE & \pounds5.5m & 6.5 & 19.5 & 25\% & \cellcolor{orange!40}NEW(a) & \cellcolor{gold!40}AVL & \cellcolor{gold!40}BOU & \cellcolor{orange!40}MCI(a) & \cellcolor{gold!40}FUL(a) \\
+Tarkowski & DEF & EVE & \pounds5.5m & 5.7 & 20.1 & 0\% & \cellcolor{orange!40}ARS & \cellcolor{fplgreen!40}BUR(a) & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}BRE & \cellcolor{fplgreen!40}WOL \\
+Hincapie & DEF & ARS & \pounds5.5m & 5.7 & 0.0 & 25\% & \cellcolor{gold!40}EVE(a) & \cellcolor{gold!40}BHA & \cellcolor{gold!40}AVL & \cellcolor{orange!40}BOU(a) & \cellcolor{orange!40}LIV \\
+Foden \textbf{(C)} & MID & MCI & \pounds8.9m & 10.5 & 10.5 & 50\% & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+Rogers & MID & AVL & \pounds7.1m & 6.8 & 14.8 & 0\% & \cellcolor{gold!40}MUN & \cellcolor{gold!40}CHE(a) & \cellcolor{fplpink!40}ARS(a) & \cellcolor{fplgreen!40}NFO & \cellcolor{gold!40}CRY(a) \\
+Wilson & MID & FUL & \pounds5.7m & 7.3 & 12.8 & 25\% & \cellcolor{fplgreen!40}NFO & \cellcolor{fplgreen!40}WHU(a) & \cellcolor{gold!40}CRY(a) & \cellcolor{orange!40}LIV & \cellcolor{gold!40}CHE \\
+B.Fernandes & MID & MUN & \pounds9.3m & 8.0 & 10.4 & 75\% & \cellcolor{gold!40}AVL(a) & \cellcolor{gold!40}NEW & \cellcolor{fplgreen!40}WOL & \cellcolor{gold!40}LEE(a) & \cellcolor{fplgreen!40}BUR(a) \\
+Calvert-Lewin \textbf{(VC)} & FWD & LEE & \pounds5.7m & 7.5 & 21.9 & 0\% & \cellcolor{gold!40}CRY & \cellcolor{gold!40}SUN(a) & \cellcolor{orange!40}LIV(a) & \cellcolor{gold!40}MUN & \cellcolor{orange!40}NEW(a) \\
+Haaland & FWD & MCI & \pounds15.0m & 8.7 & 21.3 & 75\% & \cellcolor{fplgreen!40}WHU & \cellcolor{gold!40}NFO(a) & \cellcolor{gold!40}SUN(a) & \cellcolor{gold!40}CHE & \cellcolor{gold!40}BHA \\
+
+\midrule
+\textbf{Total XI} & & & \textbf{\pounds79.4m} & \textbf{77.9} & \textbf{167.5} & & & & & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Bench}
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l|c|c|r|r|r|ccccc}
+\toprule
+\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{xPts} & \textbf{5-GW xP} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures}} \\
+\midrule
+
+Moore & GKP & SUN & \pounds3.9m & 0.0 & 0.0 & \cellcolor{gold!40}BHA(a) & \cellcolor{fplgreen!40}LEE & \cellcolor{orange!40}MCI & \cellcolor{gold!40}TOT(a) & \cellcolor{gold!40}BRE(a) \\
+Nallo & DEF & LIV & \pounds3.8m & 0.5 & 0.0 & \cellcolor{gold!40}TOT(a) & \cellcolor{fplgreen!40}WOL & \cellcolor{fplgreen!40}LEE & \cellcolor{gold!40}FUL(a) & \cellcolor{fplpink!40}ARS(a) \\
+Konak & MID & BRE & \pounds4.3m & 0.0 & 0.0 & \cellcolor{fplgreen!40}WOL(a) & \cellcolor{gold!40}BOU & \cellcolor{gold!40}TOT & \cellcolor{gold!40}EVE(a) & \cellcolor{fplgreen!40}SUN \\
+Obi & FWD & MUN & \pounds4.2m & 0.0 & 0.0 & \cellcolor{gold!40}AVL(a) & \cellcolor{gold!40}NEW & \cellcolor{fplgreen!40}WOL & \cellcolor{gold!40}LEE(a) & \cellcolor{fplgreen!40}BUR(a) \\
+
+\midrule
+\textbf{Bench Total} & & & \textbf{\pounds16.2m} & & \textbf{0.0} & & & & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Beat The League Analysis}
+\subsubsection*{Template Picks (High League Ownership)}
+These players are highly owned in your league - keeping them protects against losing ground:
+\begin{itemize}
+\item B.Fernandes (MID) - 75\% league ownership
+\item Haaland (FWD) - 75\% league ownership
+\item Foden (MID) - 50\% league ownership
+\end{itemize}
+\subsubsection*{Differentials (Low League Ownership)}
+These players give you upside vs your league rivals:
+\begin{itemize}
+\item Pickford (GKP) - only 0\% league ownership
+\item Rúben (DEF) - only 0\% league ownership
+\item Tarkowski (DEF) - only 0\% league ownership
+\item Rogers (MID) - only 0\% league ownership
+\item Calvert-Lewin (FWD) - only 0\% league ownership
+\end{itemize}
+
+\subsection{Strategy Notes}
+
+This Free Hit draft uses \textbf{Balanced} strategy:
+\begin{quote}
+Strong template core with 2-4 differentials for upside potential.
+\end{quote}
+
+Key considerations:
+\begin{itemize}
+    \item Players selected based on \textbf{ep\_next} (expected points next GW)
+    \item League ownership used to identify differentials and template picks
+    \item Formation optimized for maximum expected points
+    \item All players are currently available (no injuries/suspensions)
+\end{itemize}
+
+\textit{Note: Verify player availability and news before activating your Free Hit chip.}
+
+
+\newpage
+\section{Chip Usage Strategy}
+
+\subsection{Current Chip Status}
+
+\begin{center}
+\begin{tikzpicture}
+\node[draw=fplpurple,rounded corners=5pt,minimum width=2.3cm,minimum height=1.5cm,fill=fplgreen!20] at (0.0,0) {};\node[font=\small\bfseries,color=fplpurple] at (0.0,0.3) {Wildcard};\node[font=\scriptsize,color=fplgray] at (0.0,-0.3) {Available};
+\node[draw=fplpurple,rounded corners=5pt,minimum width=2.3cm,minimum height=1.5cm,fill=fplgreen!20] at (3.5,0) {};\node[font=\small\bfseries,color=fplpurple] at (3.5,0.3) {Free Hit};\node[font=\scriptsize,color=fplgray] at (3.5,-0.3) {Available};
+\node[draw=fplpurple,rounded corners=5pt,minimum width=2.3cm,minimum height=1.5cm,fill=fplgreen!20] at (7.0,0) {};\node[font=\small\bfseries,color=fplpurple] at (7.0,0.3) {Bench Boost};\node[font=\scriptsize,color=fplgray] at (7.0,-0.3) {Available};
+\node[draw=fplpurple,rounded corners=5pt,minimum width=2.3cm,minimum height=1.5cm,fill=fplgreen!20] at (10.5,0) {};\node[font=\small\bfseries,color=fplpurple] at (10.5,0.3) {Triple Captain};\node[font=\scriptsize,color=fplgray] at (10.5,-0.3) {Available};
+\end{tikzpicture}
+\end{center}
+
+\vspace{0.3cm}
+\textbf{Season Position:} First Half (GW1-19) | \textbf{Chips Remaining:} 4/4
+
+\subsection{Strategic Chip Planning}
+
+The 2025-26 season features two sets of chips - one for each half (GW1-19 and GW20-38). Unused chips from the first half do NOT carry over, so plan accordingly.
+
+\subsubsection*{Wildcard Strategy}
+\begin{itemize}
+    \item \textbf{First Half (GW7-9):} Use around fixture swings when multiple premium players need replacing
+    \item \textbf{Second Half (GW30-32):} Prepare for late-season Double Gameweeks and navigate rotation
+    \item \textbf{Key Trigger:} When 4+ transfers are needed or major template shift occurs
+\end{itemize}
+
+\subsubsection*{Free Hit Strategy}
+\begin{itemize}
+    \item \textbf{Target:} Blank Gameweeks when your team has 6+ players without fixtures
+    \item \textbf{Alternative:} Use during a favorable DGW if Bench Boost is already used
+    \item \textbf{Avoid:} Using too early - save for fixture congestion in spring
+\end{itemize}
+
+\subsubsection*{Bench Boost Strategy}
+\begin{itemize}
+    \item \textbf{Ideal Setup:} All 15 players have double fixtures in a DGW
+    \item \textbf{Preparation:} Build bench value 2-3 weeks before target DGW
+    \item \textbf{Target GWs:} Historically GW34-37 has best DGW opportunities
+    \item \textbf{Minimum:} At least 13 players with doubles for optimal value
+\end{itemize}
+
+\subsubsection*{Triple Captain Strategy}
+\begin{itemize}
+    \item \textbf{Primary Target:} Premium attacker (Haaland, Salah) in a DGW with 2 easy fixtures
+    \item \textbf{Form Check:} Player should be in top form with consistent returns
+    \item \textbf{Fixture Analysis:} Both DGW opponents should be FDR 2-3 (favorable)
+    \item \textbf{Avoid:} Using on single GW unless truly exceptional fixture
+\end{itemize}
+
+
+\subsection{Recommended Timing}
+
+\textit{Based on GW16 - showing only available chips.}
+
+\begin{center}
+\begin{tabular}{l|c|l}
+\toprule
+\textbf{Chip} & \textbf{Target GW} & \textbf{Reasoning} \\
+\midrule
+Wildcard 1 & Before GW20 & Use soon - does not carry over! \\
+Free Hit 1 & Next BGW & Team gaps during blanks \\
+Bench Boost & DGW34-37 & Maximum doubles opportunity \\
+Triple Captain & Next DGW & Premium player with 2 easy fixtures \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\subsection{Blank \& Double Gameweek Calendar}
+\textit{No confirmed BGW/DGW detected yet for remaining gameweeks.}
+
+
+\newpage
+\section{Season Insights}
+
+\subsection{Key Observations}
+Based on your squad's actual performance data:
+
+\begin{itemize}
+\item \textbf{Top performer:} Haaland (151 pts)
+\item \textbf{Declining form:} Virgil - consider monitoring
+\item \textbf{xG overperformer:} Van de Ven (+1.0) - regression risk
+\end{itemize}
+
+\subsection{Projected Performance}
+
+\begin{center}
+\begin{tikzpicture}
+\node[draw=fplpurple,rounded corners=10pt,minimum width=10cm,minimum height=2cm,fill=fplgreen!10] {
+    \begin{tabular}{ccc}
+        \textcolor{fplpurple}{\Large\textbf{820}} &
+        \textcolor{fplpurple}{\Large\textbf{51.2}} &
+        \textcolor{fplpurple}{\Large\textbf{1948}} \\[5pt]
+        \textcolor{fplgray}{\small Current Points} &
+        \textcolor{fplgray}{\small Avg per GW} &
+        \textcolor{fplgray}{\small Projected Final}
+    \end{tabular}
+};
+\end{tikzpicture}
+\end{center}
+
+\textit{Projection based on 16 gameweeks played at 51.2 PPG average.}
+
+
+\newpage
+\section{Competitive Analysis}
+
+\subsection{League Overview}
+
+Compare performance metrics across your mini-league competitors.
+
+{\footnotesize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|l|r|r|r|r|r|r|l}
+\toprule
+\textbf{Team} & \textbf{Manager} & \textbf{Pts} & \textbf{Rank} & \textbf{TV} & \textbf{ITB} & \textbf{Hits} & \textbf{FT} & \textbf{Chips} \\
+\midrule
+FC Arthashastra & Dinesh Katam & 820 & 4,985,009 & 98.4 & 0.0 & 0 & 5 & - \\
+Bayer Neverluzen & Abhishek Mikkilineni & 959 & 374,255 & 102.7 & 1.3 & 0 & 1 & FR, 3X, WI \\
+11 pro max & Dheerendhar Moka & 850 & 3,695,928 & 99.1 & 0.9 & 0 & 1 & WI, BB \\
+100mn down the drain & Chaitanya K & 898 & 1,795,084 & 102.5 & 0.3 & 0 & 1 & 3X, WI, FR \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+\subsection{Gameweek Performance Comparison}
+
+Side-by-side comparison of net points (excluding hits) per gameweek. Chip usage is marked with symbols: * = Wildcard, s = Free Hit, D = Bench Boost, \^{} = Triple Captain.
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{plots/competitive_points_per_gw.png}
+\end{center}
+
+\subsection{Points Progression}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{plots/competitive_points_progression.png}
+\end{center}
+
+\subsection{Rank Progression}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{plots/competitive_rank_progression.png}
+\end{center}
+
+\subsection{Player Contribution Breakdown}
+
+How each player contributed to their manager's total points this season.
+
+
+\begin{minipage}{0.48\textwidth}
+\begin{center}
+\textbf{FC Arthashastra}\\[0.3cm]
+\includegraphics[width=\textwidth]{plots/treemap_team_847569.png}
+\end{center}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+\begin{center}
+\textbf{Bayer Neverluzen}\\[0.3cm]
+\includegraphics[width=\textwidth]{plots/treemap_team_21023.png}
+\end{center}
+\end{minipage}
+
+\vspace{0.5cm}
+
+
+\begin{minipage}{0.48\textwidth}
+\begin{center}
+\textbf{11 pro max}\\[0.3cm]
+\includegraphics[width=\textwidth]{plots/treemap_team_1827604.png}
+\end{center}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+\begin{center}
+\textbf{100mn down the drain}\\[0.3cm]
+\includegraphics[width=\textwidth]{plots/treemap_team_489166.png}
+\end{center}
+\end{minipage}
+
+\vspace{0.5cm}
+
+
+\subsection{Transfer Activity (GW16 vs GW15)}
+
+Transfers made between the current and prior gameweek. Points shown are what the player scored in GW16.
+
+{\small
+\textbf{FC Arthashastra} \textit{(Dinesh Katam)}\\\quad No transfers made\\[0.3cm]
+\textbf{Bayer Neverluzen} \textit{(Abhishek Mikkilineni)}\\\quad \textcolor{rising}{\faArrowUp} IN: Foden (MID) \textcolor{rising}{11 pts}, Thiago (FWD) \textcolor{rising}{2 pts}, Cash (DEF) \textcolor{fplgray}{0 pts}\\\quad \textcolor{falling}{\faArrowDown} OUT: Mateta (FWD) \textcolor{falling}{2 pts}, Mbeumo (MID) \textcolor{falling}{2 pts}, Senesi (DEF) \textcolor{falling}{1 pts}\\\quad \textbf{Net: \textcolor{rising}{+8 pts}}\\[0.3cm]
+\textbf{11 pro max} \textit{(Dheerendhar Moka)}\\\quad \textcolor{rising}{\faArrowUp} IN: Wilson (MID) \textcolor{rising}{16 pts}, B.Fernandes (MID) \textcolor{rising}{13 pts}, Ekitiké (FWD) \textcolor{rising}{13 pts}, Saka (MID) \textcolor{rising}{11 pts}, Van den Berg (DEF) \textcolor{rising}{4 pts}\\\quad \textcolor{falling}{\faArrowDown} OUT: Calvert-Lewin (FWD) \textcolor{falling}{9 pts}, M.Salah (MID) \textcolor{falling}{7 pts}, Xavi (MID) \textcolor{falling}{4 pts}, Kudus (MID) \textcolor{falling}{2 pts}, J.Timber (DEF) \textcolor{falling}{2 pts}\\\quad \textbf{Net: \textcolor{rising}{+33 pts}}\\[0.3cm]
+
+\textbf{100mn down the drain} \textit{(Chaitanya K)}\\
+\quad \textcolor{fplpink}{\faSync} Free Hit Used - Temporary squad for this GW (10 players different)\\[0.3cm]
+}
+
+
+
+\subsection{Squad Evolution (Past 5 Gameweeks)}
+
+Starting XI across recent gameweeks. \colorbox{rising!30}{\small IN} = transferred in, \colorbox{falling!30}{\small OUT} = transferred out that GW.
+
+
+\noindent\textbf{FC Arthashastra}
+
+
+{\scriptsize
+\begin{center}
+\begin{tabular}{l|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}}
+\toprule
+\textbf{Pos} & \textbf{GW12} & \textbf{GW13} & \textbf{GW14} & \textbf{GW15} & \textbf{GW16} \\
+\midrule
+\textbf{GKP} & Sels & Sels & Sels & Sels & Dúbravka \\
+\textbf{DEF} & Wan-Bissaka \newline Van de Ven \newline Virgil & Wan-Bissaka \newline Van de Ven \newline Virgil \newline Estève & Wan-Bissaka \newline Estève \newline Virgil & Wan-Bissaka \newline Van de Ven \newline Virgil \newline Estève & Wan-Bissaka \newline Van de Ven \newline Virgil \newline Estève \\
+\textbf{MID} & B.Fernandes \newline Reijnders \newline Anderson \newline M.Salah (VC) & Wirtz \newline B.Fernandes \newline Reijnders \newline Anderson & Wirtz \newline B.Fernandes \newline Reijnders \newline Anderson \newline M.Salah (VC) & Wirtz \newline B.Fernandes \newline Reijnders \newline Anderson & Wirtz \newline B.Fernandes \newline Reijnders \newline Anderson \newline M.Salah (VC) \\
+\textbf{FWD} & Marc Guiu \newline Haaland (C) \newline Füllkrug & Haaland (C) \newline Füllkrug & Haaland (C) \newline Marc Guiu & Marc Guiu \newline Haaland (C) & Haaland (C) \\
+\midrule
+\textbf{Bench} & \tiny{Dúbravka, Wirtz, ...} & \tiny{Dúbravka, Marc Guiu, ...} & \tiny{Dúbravka, Füllkrug, ...} & \tiny{Dúbravka, M.Salah, ...} & \tiny{Sels, Marc Guiu, ...} \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+
+
+\vspace{0.3cm}\hrule\vspace{0.3cm}
+
+
+\noindent\textbf{Bayer Neverluzen}
+
+
+{\scriptsize
+\begin{center}
+\begin{tabular}{l|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}}
+\toprule
+\textbf{Pos} & \textbf{GW12} & \textbf{GW13} & \textbf{GW14} & \textbf{GW15} & \textbf{GW16} \\
+\midrule
+\textbf{GKP} & Martinez & Martinez & Dúbravka & \colorbox{rising!30}{Verbruggen} \newline \colorbox{falling!30}{\sout{Martinez}} & Dúbravka \\
+\textbf{DEF} & Senesi \newline Richards \newline Virgil \newline J.Timber \newline Andersen & Richards \newline Senesi \newline Virgil & Richards \newline Virgil \newline J.Timber & Richards \newline Virgil \newline J.Timber & Andersen \newline Virgil \newline J.Timber \newline \colorbox{rising!30}{Cash} \newline \colorbox{falling!30}{\sout{Senesi}} \\
+\textbf{MID} & Mbeumo \newline Saka (VC) \newline Sarr & \colorbox{rising!30}{Minteh} \newline Mbeumo \newline Semenyo \newline Sarr \newline Saka (VC) \newline \colorbox{falling!30}{\sout{Caicedo}} & Minteh \newline Semenyo \newline Mbeumo \newline Saka (VC) \newline \colorbox{rising!30}{Rice} \newline \colorbox{falling!30}{\sout{Sarr}} & Semenyo \newline Minteh \newline Mbeumo \newline Rice \newline Saka (VC) & Semenyo \newline \colorbox{rising!30}{Foden} \newline Rice \newline Saka (C) \newline \colorbox{falling!30}{\sout{Mbeumo}} \\
+\textbf{FWD} & Haaland (C) \newline Mateta & Mateta \newline Haaland (C) & Haaland (C) \newline Mateta & Mateta \newline Haaland (C) & \colorbox{rising!30}{Thiago} \newline Haaland (VC) \newline \colorbox{falling!30}{\sout{Mateta}} \\
+\midrule
+\textbf{Bench} & \tiny{Dúbravka, Caicedo, ...} & \tiny{Dúbravka, Andersen, ...} & \tiny{Martinez, Andersen, ...} & \tiny{Dúbravka, Andersen, ...} & \tiny{Verbruggen, Minteh, ...} \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+
+
+\vspace{0.3cm}\hrule\vspace{0.3cm}
+
+
+\noindent\textbf{11 pro max}
+
+
+{\scriptsize
+\begin{center}
+\begin{tabular}{l|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}}
+\toprule
+\textbf{Pos} & \textbf{GW12} & \textbf{GW13} & \textbf{GW14} & \textbf{GW15} & \textbf{GW16} \\
+\midrule
+\textbf{GKP} & Donnarumma & Donnarumma & Donnarumma & Donnarumma & Donnarumma \\
+\textbf{DEF} & J.Timber \newline Gudmundsson \newline Richards \newline Pedro Porro & J.Timber \newline Hartman \newline Pedro Porro \newline Richards & J.Timber \newline Hartman \newline Pedro Porro \newline Richards & Richards \newline J.Timber \newline Pedro Porro \newline Gudmundsson & \colorbox{rising!30}{Van den Berg} \newline Pedro Porro \newline Gudmundsson \newline \colorbox{falling!30}{\sout{J.Timber}} \\
+\textbf{MID} & Xavi \newline M.Salah (VC) \newline Xhaka \newline Reijnders & Reijnders \newline Xhaka \newline Kudus \newline Xavi & M.Salah (VC) \newline Reijnders \newline Kudus & Xavi \newline Reijnders \newline Kudus & \colorbox{rising!30}{B.Fernandes (VC)} \newline Reijnders \newline \colorbox{rising!30}{Saka} \newline \colorbox{rising!30}{Wilson} \newline \colorbox{falling!30}{\sout{Kudus}} \newline \colorbox{falling!30}{\sout{Xavi}} \newline \colorbox{falling!30}{\sout{M.Salah}} \\
+\textbf{FWD} & Haaland (C) \newline Calvert-Lewin & Woltemade \newline Haaland (C) & Haaland (C) \newline Woltemade \newline Calvert-Lewin & Woltemade \newline Calvert-Lewin \newline Haaland (C) & Haaland (C) \newline Woltemade \newline \colorbox{rising!30}{Ekitiké} \newline \colorbox{falling!30}{\sout{Calvert-Lewin}} \\
+\midrule
+\textbf{Bench} & \tiny{Dúbravka, Hartman, ...} & \tiny{Dúbravka, M.Salah, ...} & \tiny{Dúbravka, Xavi, ...} & \tiny{Dúbravka, Hartman, ...} & \tiny{Dúbravka, Xhaka, ...} \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+
+
+\vspace{0.3cm}\hrule\vspace{0.3cm}
+
+
+\noindent\textbf{100mn down the drain}
+
+
+{\scriptsize
+\begin{center}
+\begin{tabular}{l|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}|p{2.3cm}}
+\toprule
+\textbf{Pos} & \textbf{GW12} & \textbf{GW13} & \textbf{GW14} & \textbf{GW15} & \textbf{GW16} \faSync \\
+\midrule
+\textbf{GKP} & Pope & Dúbravka & \colorbox{rising!30}{Henderson} \newline \colorbox{falling!30}{\sout{Pope}} & Henderson & \colorbox{rising!30}{Sánchez} \newline \colorbox{falling!30}{\sout{Dúbravka}} \newline \colorbox{falling!30}{\sout{Henderson}} \\
+\textbf{DEF} & J.Timber \newline Virgil \newline Senesi \newline Andersen & J.Timber \newline Virgil \newline Senesi & J.Timber \newline \colorbox{rising!30}{O'Reilly} \newline Virgil \newline \colorbox{falling!30}{\sout{Senesi}} & J.Timber \newline O'Reilly \newline Virgil & \colorbox{rising!30}{Chalobah} \newline \colorbox{rising!30}{Hincapie} \newline \colorbox{rising!30}{Cash} \newline \colorbox{falling!30}{\sout{J.Timber}} \newline \colorbox{falling!30}{\sout{O'Reilly}} \newline \colorbox{falling!30}{\sout{Virgil}} \\
+\textbf{MID} & Sarr (VC) \newline Saka \newline Enzo & Sarr \newline Semenyo \newline Saka \newline Enzo & Saka \newline Enzo \newline Semenyo \newline \colorbox{rising!30}{Minteh (VC)} \newline \colorbox{falling!30}{\sout{Sarr}} & Saka \newline \colorbox{rising!30}{Foden (C)} \newline Enzo \newline Minteh \newline \colorbox{falling!30}{\sout{Semenyo}} & \colorbox{rising!30}{B.Fernandes} \newline Foden \newline Saka (C) \newline \colorbox{rising!30}{Eze} \newline \colorbox{rising!30}{Palmer} \newline \colorbox{falling!30}{\sout{Minteh}} \newline \colorbox{falling!30}{\sout{Enzo}} \newline \colorbox{falling!30}{\sout{Dewsbury-Hall}} \\
+\textbf{FWD} & Thiago \newline Haaland (C) \newline Mateta & Thiago (VC) \newline Haaland (C) \newline Mateta & Haaland (C) \newline Mateta \newline Thiago & Haaland (VC) \newline Mateta \newline Thiago & Thiago \newline \colorbox{rising!30}{Ekitiké (VC)} \newline \colorbox{falling!30}{\sout{Haaland}} \newline \colorbox{falling!30}{\sout{Mateta}} \\
+\midrule
+\textbf{Bench} & \tiny{Dúbravka, Semenyo, ...} & \tiny{Pope, Dewsbury-Hall, ...} & \tiny{Dúbravka, Dewsbury-Hall, ...} & \tiny{Dúbravka, Dewsbury-Hall, ...} & \tiny{\colorbox{rising!30}{Martinez}, Andersen, ...} \\
+\bottomrule
+\end{tabular}
+\end{center}
+}
+
+
+
+
+\subsection{Squad Comparison (GW16)}
+
+Current squad selections across all teams. Bench players shown in gray.
+
+{\scriptsize
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|p{2.6cm}|p{2.6cm}|p{2.6cm}|p{2.6cm}}
+\toprule
+\textbf{Pos} & \textbf{FC Arthashastra} & \textbf{Bayer Neverluzen} & \textbf{11 pro max} & \textbf{100mn down the drain} \\
+\midrule
+\textbf{GKP} & Dúbravka \newline \textcolor{fplgray}{Sels} & Dúbravka \newline \textcolor{fplgray}{Verbruggen} & Donnarumma \newline \textcolor{fplgray}{Dúbravka} & Sánchez \newline \textcolor{fplgray}{Martinez} \\
+\midrule
+\textbf{DEF} & Wan-Bissaka \newline Van de Ven \newline Virgil \newline Estève \newline \textcolor{fplgray}{Konsa} & Andersen \newline Virgil \newline J.Timber \newline Cash \newline \textcolor{fplgray}{Richards} & Van den Berg \newline Pedro Porro \newline Gudmundsson \newline \textcolor{fplgray}{Richards} \newline \textcolor{fplgray}{Hartman} & Chalobah \newline Hincapie \newline Cash \newline \textcolor{fplgray}{Andersen} \newline \textcolor{fplgray}{Rodon} \\
+\midrule
+\textbf{MID} & Wirtz \newline B.Fernandes \newline Reijnders \newline Anderson \newline M.Salah (VC) & Semenyo \newline Foden \newline Rice \newline Saka (C) \newline \textcolor{fplgray}{Minteh} & B.Fernandes (VC) \newline Reijnders \newline Saka \newline Wilson \newline \textcolor{fplgray}{Xhaka} & B.Fernandes \newline Foden \newline Saka (C) \newline Eze \newline Palmer \\
+\midrule
+\textbf{FWD} & Haaland (C) \newline \textcolor{fplgray}{Marc Guiu} \newline \textcolor{fplgray}{Füllkrug} & Thiago \newline Haaland (VC) \newline \textcolor{fplgray}{Kroupi.Jr} & Haaland (C) \newline Woltemade \newline Ekitiké & Thiago \newline Ekitiké (VC) \newline \textcolor{fplgray}{Obi} \\
+\bottomrule
+\end{tabular}
+}%
+\end{center}
+}
+
+
+\newpage
+\section{Benchmarking: Top 5 Global Managers}
+
+\textit{See how your team compares to the 5 best managers in the world. Learn from their strategies.}
+
+\subsection{Summary Comparison}
+
+\begin{tabularx}{\textwidth}{Xllr}
+\toprule
+\textbf{Team} & \textbf{Manager} & \textbf{Points} & \textbf{Rank} \\
+\midrule
+    FC Arthashastra & Dinesh Katam & 820 & 4,985,009 \\
+    The Honest Trundlers & Ian Foster & 1,144 & 1 \\
+    Matty C's 5ft 3's & Matt Chamberlain & 1,127 & 6 \\
+    Ahli Stars & Mo Khattab & 1,131 & 5 \\
+    Haaland tiembla & Charlie Shanahan & 1,132 & 3 \\
+    Walkin Humans & Gustav Walkin & 1,114 & 21 \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Points Progression}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_top_points_progression.png}
+\end{center}
+
+\subsection{Rank Progression}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_top_rank_progression.png}
+\end{center}
+
+\subsection{Points per GW Comparison}
+
+\begin{center}
+\includegraphics[width=0.95\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_top_points_per_gw.png}
+\end{center}
+
+\subsection{Player Contribution Treemaps}
+
+
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_847569.png}
+    \captionof*{figure}{FC Arthashastra}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_8142824.png}
+    \captionof*{figure}{The Honest Trundlers}
+\end{minipage}
+
+\vspace{0.5cm}
+
+
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_1259750.png}
+    \captionof*{figure}{Matty C's 5ft 3's}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_995772.png}
+    \captionof*{figure}{Ahli Stars}
+\end{minipage}
+
+\vspace{0.5cm}
+
+
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_4606481.png}
+    \captionof*{figure}{Haaland tiembla}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{/Users/dino/Downloads/ScriptsCoding/PythonPlayground/Fantasy-Premier-League/reports/plots/global_treemap_team_3915839.png}
+    \captionof*{figure}{Walkin Humans}
+\end{minipage}
+
+\subsection{Key Insights}
+\begin{itemize}
+    \item \textbf{Gap Analysis}: Study the points gap per gameweek to identify where elite managers gain.
+    \item \textbf{Chip Strategy}: Top managers often save chips for BGW/DGW opportunities.
+    \item \textbf{Captain Picks}: Elite players typically captain high-ceiling options.
+    \item \textbf{Transfer Discipline}: The best managers minimize transfer hits—quality over quantity.
+\end{itemize}
+
+
+\vspace{1cm}
+\begin{center}
+\rule{0.5\textwidth}{1pt}\\[0.5cm]
+{\small\color{fplgray} Generated by FPL Report Generator}\\
+{\small\color{fplgray} Data Source: Official FPL API | Generated: 2025-12-20 17:43}
+\end{center}
+
+\end{document}
