@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 import copy
+from typing import List, Optional
 
 from reports.fpl_report.data_fetcher import (
     FPLDataFetcher, 
@@ -53,6 +54,7 @@ from utils.config import (
     NO_COMPETITIVE,
     VERBOSE,
     CACHE,
+    TOP_GLOBAL_COUNT,
 )
 
 
@@ -119,6 +121,28 @@ def log(message: str, verbose: bool = True):
     """Print log message if verbose mode is enabled."""
     if verbose:
         print(f"[INFO] {message}")
+
+
+def get_top_global_comparison_ids(
+    team_id: int,
+    use_cache: bool = True,
+    session_cache: Optional[SessionCacheManager] = None,
+) -> List[int]:
+    """Get entry IDs for user + top N global managers (based on config)."""
+    top_teams = get_top_global_teams(n=TOP_GLOBAL_COUNT, use_cache=use_cache, session_cache=session_cache)
+    top_entry_ids = [t.get('entry_id') for t in top_teams if t.get('entry_id') is not None]
+
+    # De-duplicate while preserving order
+    unique_top_ids: List[int] = []
+    for entry_id in top_entry_ids:
+        if entry_id not in unique_top_ids:
+            unique_top_ids.append(entry_id)
+
+    # Put user's team first for consistent report ordering
+    if team_id in unique_top_ids:
+        return [team_id] + [eid for eid in unique_top_ids if eid != team_id]
+
+    return [team_id] + unique_top_ids
 
 
 def main():
@@ -651,17 +675,16 @@ def main():
     # Top Global Managers Competitive Analysis
     top_global_data = None
     if not args.no_competitive:
-        log("Building competitive analysis vs Top 5 Global Managers...", verbose)
+        log(f"Building competitive analysis vs Top {TOP_GLOBAL_COUNT} Global Managers...", verbose)
         try:
-            # Fetch top 5 global team entry IDs
-            top_teams = get_top_global_teams(n=5, use_cache=use_cache, session_cache=session_cache)
-            if top_teams:
-                top_entry_ids = [t['entry_id'] for t in top_teams]
-                # Add user's team for comparison
-                if team_id not in top_entry_ids:
-                    global_comparison_ids = [team_id] + top_entry_ids
-                else:
-                    global_comparison_ids = top_entry_ids
+            global_comparison_ids = get_top_global_comparison_ids(
+                team_id=team_id,
+                use_cache=use_cache,
+                session_cache=session_cache
+            )
+            top_entry_ids = [eid for eid in global_comparison_ids if eid != team_id]
+
+            if top_entry_ids:
                 
                 print(f"  Comparing user vs top {len(top_entry_ids)} global managers")
                 

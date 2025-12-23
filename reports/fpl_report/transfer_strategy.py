@@ -1465,6 +1465,10 @@ class FreeHitOptimizer:
         3. Fixture difficulty bonus - boost players with easy fixtures
         4. Home advantage bonus
         5. Differential bonus - based on league ownership
+        6. Momentum bonus - rewards players with high form/ppg/total_points
+        
+        Note: Budget maximization is handled as a tie-break in squad selection,
+        not in the score itself (to avoid sacrificing expected points for spend).
         """
         player_id = int(row.get('id', 0))
         team_id = int(row.get('team', 0) or 0)
@@ -1528,21 +1532,28 @@ class FreeHitOptimizer:
             diff_bonus = diff_multiplier * ((1 - league_own) ** 2)
         
         # -----------------------------------------------------------------
-        # 4. Value premium bonus (encourages spending budget on Free Hit)
+        # 4. Momentum bonus - rewards proven in-form performers
         # -----------------------------------------------------------------
-        price = float(row.get('price', 0) or row.get('now_cost', 0) / 10.0)
-        # Premium players (8m+) get a small bonus to encourage spending
-        # This helps ensure we use the full budget on quality players
-        value_bonus = 0.0
-        if price >= 10.0:
-            value_bonus = 1.0  # Premium (10m+)
-        elif price >= 8.0:
-            value_bonus = 0.5  # Mid-premium (8-10m)
+        # Momentum is real in FPL - players on hot streaks tend to continue
+        # Use form (recent avg), ppg (season avg), and total_points (volume)
+        form = float(row.get('form', 0) or 0)
+        ppg = float(row.get('points_per_game', 0) or 0)
+        total_points = float(row.get('total_points', 0) or 0)
+        
+        # Normalize each component to a 0-1 scale (bounded)
+        # Form typically ranges 0-10, ppg 0-10, total_points 0-200+
+        form_norm = min(form / 10.0, 1.0)
+        ppg_norm = min(ppg / 10.0, 1.0)
+        total_pts_norm = min(total_points / 150.0, 1.0)
+        
+        # Weighted combination: form (recent) > ppg (consistency) > total_points (volume)
+        # Max momentum_bonus = 2.0 (significant but not overwhelming base score)
+        momentum_bonus = 2.0 * (form_norm * 0.45 + ppg_norm * 0.35 + total_pts_norm * 0.20)
         
         # -----------------------------------------------------------------
         # 5. Total score
         # -----------------------------------------------------------------
-        score = base_score + fixture_bonus + home_bonus + diff_bonus + value_bonus
+        score = base_score + fixture_bonus + home_bonus + diff_bonus + momentum_bonus
         
         return round(score, 3)
     
@@ -1565,8 +1576,11 @@ class FreeHitOptimizer:
         
         return pos_df.to_dict('records')
     
-    def _get_cheapest_players(self, position: str, exclude_ids: set) -> list:
-        """Get cheapest available players for bench filling."""
+    def _get_bench_candidates(self, position: str, exclude_ids: set) -> list:
+        """Get bench candidates sorted by score (desc) then price (desc) for tie-break.
+        
+        This ensures we pick high-quality bench options that also maximize spend.
+        """
         pos_df = self.players_df[self.players_df['position'] == position].copy()
         
         # Filter available players
@@ -1576,23 +1590,304 @@ class FreeHitOptimizer:
         # Exclude already selected
         pos_df = pos_df[~pos_df['id'].isin(exclude_ids)]
         
-        # Sort by price ascending
-        pos_df = pos_df.sort_values('price', ascending=True)
+        # Calculate scores
+        pos_df['score'] = pos_df.apply(self._calculate_score, axis=1)
+        
+        # Sort by score descending, then by price descending (tie-break: spend more)
+        pos_df = pos_df.sort_values(['score', 'price'], ascending=[False, False])
         
         return pos_df.to_dict('records')
     
     def build_squad(self) -> Dict:
         """Build optimal 15-player Free Hit squad.
         
-        Strategy:
-        1. Select best XI first (greedy by score, respecting constraints)
-        2. Fill remaining squad slots with cheapest available players
-        3. Determine best starting XI formation
-        4. Select captain and vice captain
+        Uses MIP optimization when available to:
+        1. Maximize starting XI score (primary objective)
+        2. Maximize budget usage as tie-break (secondary objective)
+        
+        Falls back to greedy selection when MIP is unavailable.
         
         Returns:
             Dict with squad, starting_xi, bench, formation, captain, vice_captain,
             budget info, and league analysis data.
+        """
+        # Try MIP-based optimization first (if available)
+        if MIP_AVAILABLE:
+            try:
+                result = self._build_squad_mip()
+                if result is not None:
+                    return result
+            except Exception:
+                pass  # Fall back to greedy
+        
+        # Fall back to greedy selection
+        return self._build_squad_greedy()
+    
+    def _build_squad_mip(self) -> Optional[Dict]:
+        """Build squad using MIP optimization.
+        
+        Primary objective: Maximize total XI score
+        Secondary objective: Maximize spend (as tie-break, small weight)
+        
+        Returns:
+            Squad dict if successful, None if optimization fails.
+        """
+        import sasoptpy as so
+        import highspy
+        
+        # Build candidate pool (top players by score per position)
+        candidates = []
+        candidate_pool_size = 25  # Per position
+        
+        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+            pos_candidates = self._get_available_players(pos)[:candidate_pool_size]
+            for p in pos_candidates:
+                candidates.append({
+                    'id': p['id'],
+                    'name': p.get('web_name', 'Unknown'),
+                    'position': pos,
+                    'team_id': p['team'],
+                    'price': p['price'],
+                    'score': p['score']
+                })
+        
+        if len(candidates) < 15:
+            return None  # Not enough candidates
+        
+        # Create MIP model
+        model = so.Model(name='FreeHit_Squad_Optimizer')
+        
+        # Index sets
+        players = list(range(len(candidates)))
+        positions = ['GKP', 'DEF', 'MID', 'FWD']
+        
+        cand = candidates
+        
+        # Decision variables
+        # x[p] = 1 if player p is in the squad
+        x = model.add_variables(players, vartype=so.BIN, name='squad')
+        
+        # lineup[p] = 1 if player p is in starting XI
+        lineup = model.add_variables(players, vartype=so.BIN, name='lineup')
+        
+        # CONSTRAINTS
+        
+        # 1. Squad size = 15
+        model.add_constraint(
+            so.quick_sum(x[p] for p in players) == 15,
+            name='squad_size'
+        )
+        
+        # 2. Position quotas for full squad
+        for pos in positions:
+            quota = self.POSITION_QUOTAS[pos]
+            model.add_constraint(
+                so.quick_sum(x[p] for p in players if cand[p]['position'] == pos) == quota,
+                name=f'position_{pos}'
+            )
+        
+        # 3. Max 3 players per team
+        team_ids = set(c['team_id'] for c in cand)
+        for tid in team_ids:
+            model.add_constraint(
+                so.quick_sum(x[p] for p in players if cand[p]['team_id'] == tid) <= self.MAX_PER_TEAM,
+                name=f'team_{tid}'
+            )
+        
+        # 4. Budget constraint
+        model.add_constraint(
+            so.quick_sum(x[p] * cand[p]['price'] for p in players) <= self.total_budget,
+            name='budget'
+        )
+        
+        # 5. Lineup size = 11
+        model.add_constraint(
+            so.quick_sum(lineup[p] for p in players) == 11,
+            name='lineup_size'
+        )
+        
+        # 6. Can only be in lineup if in squad
+        for p in players:
+            model.add_constraint(lineup[p] <= x[p], name=f'lineup_squad_{p}')
+        
+        # 7. Formation constraints (min/max per position in XI)
+        for pos in positions:
+            pos_lineup = so.quick_sum(
+                lineup[p] for p in players if cand[p]['position'] == pos
+            )
+            model.add_constraint(pos_lineup >= self.XI_MIN[pos], name=f'xi_min_{pos}')
+            model.add_constraint(pos_lineup <= self.XI_MAX[pos], name=f'xi_max_{pos}')
+        
+        # OBJECTIVE: Maximize XI score, with small tie-break for budget usage
+        # Primary: sum of scores for starting XI
+        # Secondary: total spend (tiny coefficient to act as tie-break only)
+        xi_score = so.quick_sum(lineup[p] * cand[p]['score'] for p in players)
+        total_spend = so.quick_sum(x[p] * cand[p]['price'] for p in players)
+        
+        # Tie-break weight: small enough not to sacrifice score for spend
+        # Max spend ~100m, max score difference ~50, so 0.001 ensures tie-break only
+        objective = xi_score + 0.001 * total_spend
+        
+        model.set_objective(objective, sense=so.MAX, name='maximize_xi_score')
+        
+        # Solve using HiGHS
+        solution = self._solve_mip_with_highs(model)
+        
+        if solution is None or solution.get('status') != 'optimal':
+            return None
+        
+        sol_values = solution['solution']
+        
+        # Extract squad and lineup
+        squad = []
+        starting_xi = []
+        bench = []
+        team_counts = {}
+        position_counts = {'GKP': 0, 'DEF': 0, 'MID': 0, 'FWD': 0}
+        spent = 0.0
+        
+        for p in players:
+            x_val = sol_values.get(f'squad[{p}]', 0)
+            if x_val > 0.5:  # Selected in squad
+                player_data = cand[p]
+                
+                # Get full player info from DataFrame
+                pid = player_data['id']
+                player_row = self.players_df[self.players_df['id'] == pid].iloc[0].to_dict()
+                player_row['score'] = player_data['score']
+                
+                lineup_val = sol_values.get(f'lineup[{p}]', 0)
+                is_starter = lineup_val > 0.5
+                
+                formatted = self._format_player(player_row, is_starter=is_starter)
+                squad.append(formatted)
+                
+                if is_starter:
+                    starting_xi.append(formatted)
+                else:
+                    bench.append(formatted)
+                
+                team_counts[player_data['team_id']] = team_counts.get(player_data['team_id'], 0) + 1
+                position_counts[player_data['position']] += 1
+                spent += player_data['price']
+        
+        # Sort starting XI and bench
+        pos_order = {'GKP': 0, 'DEF': 1, 'MID': 2, 'FWD': 3}
+        starting_xi.sort(key=lambda x: (pos_order.get(x['position'], 4), -x['score']))
+        bench.sort(key=lambda x: (0 if x['position'] == 'GKP' else 1, -x['score']))
+        
+        # Determine formation
+        formation = self._get_formation(starting_xi)
+        
+        # Select captain and vice captain
+        captain, vice_captain = self._select_captains(starting_xi)
+        
+        # Analyze differentials
+        differentials = self._identify_differentials(starting_xi)
+        template_picks = self._identify_template_picks(starting_xi)
+        
+        return {
+            'squad': squad,
+            'starting_xi': starting_xi,
+            'bench': bench,
+            'formation': formation,
+            'captain': captain,
+            'vice_captain': vice_captain,
+            'budget': {
+                'total': self.total_budget,
+                'spent': round(spent, 1),
+                'remaining': round(self.total_budget - spent, 1)
+            },
+            'team_counts': team_counts,
+            'position_counts': position_counts,
+            'strategy': self.strategy,
+            'league_analysis': {
+                'sample_size': self.sample_size,
+                'differentials': differentials,
+                'template_picks': template_picks
+            }
+        }
+    
+    def _solve_mip_with_highs(self, model) -> Optional[Dict]:
+        """Solve sasoptpy model using HiGHS solver."""
+        import highspy
+        import re
+        
+        fd, mps_file = tempfile.mkstemp(suffix='.mps')
+        os.close(fd)
+        
+        try:
+            model.export_mps(filename=mps_file)
+            
+            # Fix MPS format for HiGHS
+            with open(mps_file, 'r') as f:
+                content = f.read()
+            is_max = ' MAX ' in content or '\tMAX\t' in content
+            content = re.sub(r'(\s)(MAX|MIN)(\s+)', r'\1N  \3', content)
+            with open(mps_file, 'w') as f:
+                f.write(content)
+            
+            # Solve with HiGHS
+            h = highspy.Highs()
+            h.setOptionValue('time_limit', 30.0)
+            h.setOptionValue('output_flag', False)
+            h.readModel(mps_file)
+            
+            if is_max:
+                h.changeObjectiveSense(highspy.ObjSense.kMaximize)
+            
+            h.run()
+            status = h.getModelStatus()
+            
+            if status == highspy.HighsModelStatus.kOptimal:
+                sol = h.getSolution()
+                col_values = sol.col_value
+                
+                try:
+                    lp = h.getLp()
+                    col_names = lp.col_names_
+                except AttributeError:
+                    col_names = [var.get_name() for var in model.get_variables()]
+                
+                if len(col_names) == len(col_values):
+                    solution = dict(zip(col_names, col_values))
+                else:
+                    solution = {}
+                    sasoptpy_vars = list(model.get_variables())
+                    for i, val in enumerate(col_values):
+                        if i < len(sasoptpy_vars):
+                            solution[sasoptpy_vars[i].get_name()] = val
+                
+                return {'status': 'optimal', 'solution': solution}
+            
+            return None
+            
+        except Exception:
+            return None
+        finally:
+            if os.path.exists(mps_file):
+                try:
+                    os.unlink(mps_file)
+                except:
+                    pass
+    
+    def _get_formation(self, starting_xi: List[Dict]) -> str:
+        """Determine formation from starting XI."""
+        counts = {'DEF': 0, 'MID': 0, 'FWD': 0}
+        for p in starting_xi:
+            pos = p['position']
+            if pos in counts:
+                counts[pos] += 1
+        return f"{counts['DEF']}-{counts['MID']}-{counts['FWD']}"
+    
+    def _build_squad_greedy(self) -> Dict:
+        """Build squad using greedy selection (fallback when MIP unavailable).
+        
+        Strategy:
+        1. Select best XI first (greedy by score, respecting constraints)
+        2. Fill remaining slots with high-score players (using price as tie-break)
+        3. Determine best starting XI formation
+        4. Select captain and vice captain
         """
         squad = []
         team_counts = {}
@@ -1601,10 +1896,9 @@ class FreeHitOptimizer:
         spent = 0.0
         
         # Phase 1: Build a strong starting XI (11 players)
-        # Target: 1 GKP, 3-5 DEF, 2-5 MID, 1-3 FWD (valid formations)
         xi_targets = {'GKP': 1, 'DEF': 4, 'MID': 4, 'FWD': 2}  # Default 4-4-2
         
-        # Get sorted players by position
+        # Get sorted players by position (by score desc, then price desc)
         candidates_by_pos = {}
         for pos in ['GKP', 'DEF', 'MID', 'FWD']:
             candidates_by_pos[pos] = self._get_available_players(pos)
@@ -1637,15 +1931,15 @@ class FreeHitOptimizer:
                 team_counts[team_id] = team_counts.get(team_id, 0) + 1
                 spent += price
         
-        # Phase 2: Fill remaining quota with cheap bench players
+        # Phase 2: Fill remaining quota with bench candidates (score+price sorted)
         for pos in ['GKP', 'DEF', 'MID', 'FWD']:
             remaining = self.POSITION_QUOTAS[pos] - position_counts[pos]
             if remaining <= 0:
                 continue
                 
-            cheap_players = self._get_cheapest_players(pos, selected_ids)
+            bench_candidates = self._get_bench_candidates(pos, selected_ids)
             
-            for player in cheap_players:
+            for player in bench_candidates:
                 if remaining <= 0:
                     break
                     
@@ -1658,9 +1952,6 @@ class FreeHitOptimizer:
                     continue
                 if spent + price > self.total_budget:
                     continue
-                
-                # Add score for bench player
-                player['score'] = self._calculate_score(player)
                 
                 # Select player
                 squad.append(self._format_player(player, is_starter=False))

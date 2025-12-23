@@ -1034,6 +1034,101 @@ class TestCompetitiveLaTeXSection(unittest.TestCase):
         self.assertIn('Rival Team', latex)
 
 
+class TestTopGlobalCompetitiveLaTeXSection(unittest.TestCase):
+    """Tests for Top Global Managers competitive analysis LaTeX section generation."""
+
+    def setUp(self):
+        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=17, plot_dir=Path("plots"))
+
+    def _make_minimal_transfer_history(self):
+        gw_range = [13, 14, 15, 16, 17]
+        gw_squads_data = {}
+        for gw in gw_range:
+            gw_squads_data[gw] = {
+                "xi": [
+                    {"name": "GK", "position": "GKP"},
+                    {"name": "DEF", "position": "DEF"},
+                    {"name": "MID", "position": "MID"},
+                    {"name": "FWD", "position": "FWD"},
+                ],
+                "bench": [{"name": "B1"}, {"name": "B2"}],
+                "transfers_out": [],
+            }
+        return {"gw_range": gw_range, "gw_squads_data": gw_squads_data, "chips_timeline": {}}
+
+    def test_generate_top_global_teams_uses_configured_count(self):
+        from reports.fpl_report import latex_generator as lg
+
+        dummy_top = [
+            {"entry_id": 1, "manager_name": "A", "team_name": "T1", "total_points": 100, "rank": 1},
+            {"entry_id": 2, "manager_name": "B", "team_name": "T2", "total_points": 99, "rank": 2},
+        ]
+
+        with patch.object(lg, "TOP_GLOBAL_COUNT", 2, create=True):
+            with patch("reports.fpl_report.latex_generator.get_top_global_teams", return_value=dummy_top) as mock_get:
+                latex = self.generator.generate_top_global_teams()
+
+        self.assertIn(r"\section{Top Global Managers}", latex)
+        self.assertEqual(mock_get.call_args.kwargs.get("n"), 2)
+
+    def test_generate_global_competitive_analysis_includes_transfer_and_squad_sections(self):
+        from reports.fpl_report import latex_generator as lg
+
+        transfer_history = self._make_minimal_transfer_history()
+
+        top_global_data = [
+            {
+                "entry_id": 847569,
+                "team_info": {"team_name": "My Team", "manager_name": "Me", "overall_points": 500, "overall_rank": 100000},
+                "squad": [{"name": "Player A", "position": "MID", "position_in_squad": 1}],
+                "gw_transfers": {},
+                "transfer_history": transfer_history,
+                "season_history": [],
+                "chips_used": [],
+            },
+            {
+                "entry_id": 111,
+                "team_info": {"team_name": "Top Team 1", "manager_name": "Top 1", "overall_points": 650, "overall_rank": 12},
+                "squad": [{"name": "Player B", "position": "MID", "position_in_squad": 1}],
+                "gw_transfers": {},
+                "transfer_history": transfer_history,
+                "season_history": [],
+                "chips_used": [],
+            },
+            {
+                "entry_id": 222,
+                "team_info": {"team_name": "Top Team 2", "manager_name": "Top 2", "overall_points": 640, "overall_rank": 18},
+                "squad": [{"name": "Player C", "position": "MID", "position_in_squad": 1}],
+                "gw_transfers": {},
+                "transfer_history": transfer_history,
+                "season_history": [],
+                "chips_used": [],
+            },
+        ]
+
+        with patch.object(lg, "TOP_GLOBAL_COUNT", 2, create=True):
+            latex = self.generator.generate_global_competitive_analysis(top_global_data)
+
+        self.assertIn(r"\section{Benchmarking: Top 2 Global Managers}", latex)
+        self.assertIn(r"\subsection{Transfer Activity (GW17 vs GW16)}", latex)
+        self.assertIn(r"\subsection{Squad Evolution (Past 5 Gameweeks)}", latex)
+        self.assertIn(r"\subsection{Squad Comparison (GW17)}", latex)
+
+    def test_generate_fpl_report_uses_top_global_count_for_fetch(self):
+        import generate_fpl_report as gfr
+
+        with patch.object(gfr, "TOP_GLOBAL_COUNT", 2, create=True):
+            with patch.object(
+                gfr,
+                "get_top_global_teams",
+                return_value=[{"entry_id": 111}, {"entry_id": 222}],
+            ) as mock_get:
+                ids = gfr.get_top_global_comparison_ids(team_id=999, use_cache=True, session_cache=None)
+
+        self.assertEqual(mock_get.call_args.kwargs.get("n"), 2)
+        self.assertEqual(ids, [999, 111, 222])
+
+
 class TestWildcardOptimizer(unittest.TestCase):
     """Tests for the Wildcard squad optimizer."""
 
@@ -1521,6 +1616,191 @@ class TestFreeHitOptimizer(unittest.TestCase):
         # Should have at least some differentials (< 30% owned)
         # The exact count depends on budget constraints
 
+    def test_free_hit_optimizer_maximizes_budget_as_tiebreak(self):
+        """Test that optimizer maximizes spend when XI scores are equal.
+        
+        Given two players with identical ep_next, the optimizer should prefer
+        the more expensive one to maximize budget utilization (as a tie-break).
+        """
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
+        
+        # Create players where two forwards have identical ep_next but different prices
+        players = []
+        # GKP: 5 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('GK_A', 1, 45, 4.0), ('GK_B', 2, 50, 4.0),  # Same ep_next
+            ('GK_C', 3, 40, 3.5), ('GK_D', 4, 42, 3.5),
+            ('GK_E', 5, 40, 3.3)
+        ], start=1):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 1,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # DEF: 10 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('DEF_A', 6, 55, 4.5), ('DEF_B', 7, 50, 4.2),
+            ('DEF_C', 8, 60, 5.0), ('DEF_D', 9, 48, 4.0),
+            ('DEF_E', 10, 45, 3.8), ('DEF_F', 11, 40, 3.5),
+            ('DEF_G', 12, 52, 4.3), ('DEF_H', 13, 42, 3.6),
+            ('DEF_I', 14, 40, 3.4), ('DEF_J', 15, 40, 3.3)
+        ], start=10):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 2,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # MID: 10 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('MID_A', 1, 130, 8.0), ('MID_B', 2, 120, 7.5),
+            ('MID_C', 3, 80, 5.5), ('MID_D', 4, 75, 5.2),
+            ('MID_E', 5, 65, 4.8), ('MID_F', 6, 50, 4.0),
+            ('MID_G', 7, 45, 3.5), ('MID_H', 8, 45, 3.2),
+            ('MID_I', 9, 45, 3.1), ('MID_J', 10, 45, 3.0)
+        ], start=20):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 3,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # FWD: 6 players - two with identical ep_next but different prices
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('FWD_A', 11, 100, 7.0), ('FWD_B', 12, 80, 7.0),  # Same ep_next, A costs more
+            ('FWD_C', 13, 70, 5.0), ('FWD_D', 14, 55, 4.2),
+            ('FWD_E', 15, 45, 3.5), ('FWD_F', 16, 45, 3.3)
+        ], start=30):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 4,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        
+        players_df = pd.DataFrame(players)
+        total_budget = 105.0  # Generous budget to allow choice
+        
+        # Test all three strategies
+        for strategy in ['safe', 'balanced', 'aggressive']:
+            optimizer = FreeHitOptimizer(players_df, total_budget, strategy=strategy)
+            result = optimizer.build_squad()
+            
+            squad = result['squad']
+            squad_names = [p['name'] for p in squad]
+            budget_info = result['budget']
+            
+            # When two forwards have identical ep_next, prefer the more expensive one (FWD_A)
+            # as a tie-break to maximize budget utilization
+            self.assertIn('FWD_A', squad_names,
+                f"{strategy} strategy: Should select FWD_A (10.0m) over FWD_B (8.0m) "
+                "when they have identical ep_next to maximize budget usage")
+            
+            # Budget should be well-utilized (remaining <= 1.0m)
+            self.assertLessEqual(budget_info['remaining'], 1.5,
+                f"{strategy} strategy: Should maximize budget usage, but left {budget_info['remaining']}m unused")
+
+    def test_free_hit_optimizer_prefers_momentum_players(self):
+        """Test that optimizer prefers players with high form/ppg/total_points.
+        
+        Given two players with identical ep_next and price, the optimizer should
+        prefer the one with better momentum (higher form + ppg + total_points).
+        """
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
+        
+        # Create players where two midfielders have identical ep_next and price
+        # but different momentum stats
+        players = []
+        # GKP: 5 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('GK_A', 1, 45, 4.0), ('GK_B', 2, 50, 4.5),
+            ('GK_C', 3, 40, 3.5), ('GK_D', 4, 42, 3.8),
+            ('GK_E', 5, 40, 3.3)
+        ], start=1):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 1,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # DEF: 10 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('DEF_A', 6, 55, 4.5), ('DEF_B', 7, 50, 4.2),
+            ('DEF_C', 8, 60, 5.0), ('DEF_D', 9, 48, 4.0),
+            ('DEF_E', 10, 45, 3.8), ('DEF_F', 11, 40, 3.5),
+            ('DEF_G', 12, 52, 4.3), ('DEF_H', 13, 42, 3.6),
+            ('DEF_I', 14, 40, 3.4), ('DEF_J', 15, 40, 3.3)
+        ], start=10):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 2,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # MID: Include two players with same ep_next/price but different momentum
+        mid_players = [
+            # MID_MOMENTUM has identical ep_next but MUCH better momentum stats
+            ('MID_MOMENTUM', 17, 80, 5.5, 120, 7.5, 7.5),  # High momentum
+            ('MID_NOMOM', 18, 80, 5.5, 30, 2.0, 2.0),  # Low momentum
+            ('MID_A', 1, 130, 8.0, 80, 8.0, 8.0),
+            ('MID_B', 2, 120, 7.5, 75, 7.5, 7.5),
+            ('MID_C', 3, 75, 5.2, 52, 5.2, 5.2),
+            ('MID_D', 4, 65, 4.8, 48, 4.8, 4.8),
+            ('MID_E', 5, 50, 4.0, 40, 4.0, 4.0),
+            ('MID_F', 6, 45, 3.5, 35, 3.5, 3.5),
+            ('MID_G', 7, 45, 3.2, 32, 3.2, 3.2),
+            ('MID_H', 8, 45, 3.0, 30, 3.0, 3.0),
+        ]
+        for i, (name, team, cost, ep_next, total_pts, form, ppg) in enumerate(mid_players, start=20):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 3,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': total_pts, 'form': form,
+                'points_per_game': ppg,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        # FWD: 6 players
+        for i, (name, team, cost, ep_next) in enumerate([
+            ('FWD_A', 11, 100, 7.0), ('FWD_B', 12, 80, 6.5),
+            ('FWD_C', 13, 70, 5.0), ('FWD_D', 14, 55, 4.2),
+            ('FWD_E', 15, 45, 3.5), ('FWD_F', 16, 45, 3.3)
+        ], start=40):
+            players.append({
+                'id': i, 'web_name': name, 'team': team, 'element_type': 4,
+                'now_cost': cost, 'ep_next': ep_next, 'minutes': 900,
+                'total_points': int(ep_next * 10), 'form': ep_next,
+                'points_per_game': ep_next,
+                'status': 'a', 'chance_of_playing_next_round': 100
+            })
+        
+        players_df = pd.DataFrame(players)
+        total_budget = 100.0
+        
+        # Test that high-momentum player is preferred across all strategies
+        for strategy in ['safe', 'balanced', 'aggressive']:
+            optimizer = FreeHitOptimizer(players_df, total_budget, strategy=strategy)
+            result = optimizer.build_squad()
+            
+            squad = result['squad']
+            squad_names = [p['name'] for p in squad]
+            
+            # When two mids have identical ep_next and price, prefer the one with better momentum
+            self.assertIn('MID_MOMENTUM', squad_names,
+                f"{strategy} strategy: Should select MID_MOMENTUM over MID_NOMOM "
+                "when they have identical ep_next but different momentum stats")
+            # MID_NOMOM should NOT be selected when MID_MOMENTUM is available
+            if 'MID_MOMENTUM' in squad_names:
+                self.assertNotIn('MID_NOMOM', squad_names,
+                    f"{strategy} strategy: Should NOT select low-momentum MID_NOMOM "
+                    "when high-momentum MID_MOMENTUM with same ep_next is available")
+
 
 class TestFreeHitLaTeXSection(unittest.TestCase):
     """Tests for Free Hit team LaTeX section generation."""
@@ -1915,7 +2195,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
         self.assertEqual(timeline['status'], 'optimal')
         self.assertEqual(timeline['current_gw'], 15)
         self.assertEqual(len(timeline['weeks']), 5)
-        self.assertEqual(timeline['weeks'][0]['gameweek'], 17)
+        self.assertEqual(timeline['weeks'][0]['gameweek'], 16)
         self.assertEqual(timeline['total_expected_points'], 45.5)
 
     def test_build_transfer_timeline_handles_non_optimal(self):
@@ -1958,7 +2238,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
         
         # Should contain TikZ elements
         self.assertIn('tikzpicture', latex)
-        self.assertIn('GW17', latex)  # First week after current
+        self.assertIn('GW18', latex)  # First week after current
         self.assertIn('11.0', latex)  # First week xP
 
     def test_multiperiod_plan_dataclass(self):

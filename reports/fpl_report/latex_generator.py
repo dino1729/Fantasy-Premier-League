@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 from .data_fetcher import get_bgw_dgw_gameweeks, get_top_global_teams
-from utils.config import SEASON as DEFAULT_SEASON
+from utils.config import SEASON as DEFAULT_SEASON, TOP_GLOBAL_COUNT
 
 
 class LaTeXReportGenerator:
@@ -2617,58 +2617,7 @@ Based on your squad's actual performance data:
 
         summary_table = '\n'.join(summary_rows)
 
-        # Build squad comparison table
-        # Group players by position for each team
-        squad_sections = []
-
-        for pos_name, pos_code in [('GKP', 'GKP'), ('DEF', 'DEF'), ('MID', 'MID'), ('FWD', 'FWD')]:
-            pos_row_parts = [rf"\textbf{{{pos_name}}}"]
-
-            for entry in competitive_data:
-                squad = entry.get('squad', [])
-                # Filter players by position
-                pos_players = [p for p in squad if p.get('position') == pos_code]
-                # Sort by position_in_squad (XI first, then bench)
-                pos_players_sorted = sorted(pos_players, key=lambda x: x.get('position_in_squad', 99))
-
-                player_lines = []
-                for p in pos_players_sorted:
-                    name = self._escape_latex(p.get('name', 'Unknown'))
-                    suffix = ''
-                    if p.get('is_captain'):
-                        suffix = ' (C)'
-                    elif p.get('is_vice_captain'):
-                        suffix = ' (VC)'
-
-                    # Mark bench players
-                    pos_in_squad = p.get('position_in_squad', 0)
-                    if pos_in_squad > 11:
-                        name = rf"\textcolor{{fplgray}}{{{name}{suffix}}}"
-                    else:
-                        name = rf"{name}{suffix}"
-
-                    player_lines.append(name)
-
-                cell_content = r' \newline '.join(player_lines) if player_lines else '-'
-                pos_row_parts.append(cell_content)
-
-            squad_sections.append(' & '.join(pos_row_parts) + r' \\')
-
-        squad_table = '\n\\midrule\n'.join(squad_sections)
-
-        # Build column spec for teams
-        num_teams = len(competitive_data)
-        team_header_parts = []
-        for e in competitive_data:
-            team_info = e.get('team_info', {})
-            team_name = self._escape_latex(team_info.get('team_name', 'Team'))
-            team_header_parts.append(rf"\textbf{{{team_name}}}")
-        team_headers = ' & '.join(team_header_parts)
-
-        # Calculate column width for squad table based on number of teams
-        squad_col_width = max(1.8, 13.0 / (num_teams + 1))
-        # Build column spec for squad table (e.g., l|p{2.0cm}|p{2.0cm}|...)
-        squad_col_spec = 'l|' + '|'.join([f'p{{{squad_col_width:.1f}cm}}' for _ in range(num_teams)])
+        squad_comparison_content = self._generate_squad_comparison_section(competitive_data)
 
         # Build player contribution treemap section
         treemap_sections = []
@@ -2756,6 +2705,67 @@ How each player contributed to their manager's total points this season.
 
 {transfer_history_content}
 
+{squad_comparison_content}
+"""
+
+    def _generate_squad_comparison_section(self, competitive_data: List[Dict]) -> str:
+        """Generate the squad comparison subsection for a set of teams."""
+        if not competitive_data:
+            return ""
+
+        # Group players by position for each team
+        squad_sections = []
+
+        for pos_name, pos_code in [('GKP', 'GKP'), ('DEF', 'DEF'), ('MID', 'MID'), ('FWD', 'FWD')]:
+            pos_row_parts = [rf"\textbf{{{pos_name}}}"]
+
+            for entry in competitive_data:
+                squad = entry.get('squad', [])
+                # Filter players by position
+                pos_players = [p for p in squad if p.get('position') == pos_code]
+                # Sort by position_in_squad (XI first, then bench)
+                pos_players_sorted = sorted(pos_players, key=lambda x: x.get('position_in_squad', 99))
+
+                player_lines = []
+                for p in pos_players_sorted:
+                    name = self._escape_latex(p.get('name', 'Unknown'))
+                    suffix = ''
+                    if p.get('is_captain'):
+                        suffix = ' (C)'
+                    elif p.get('is_vice_captain'):
+                        suffix = ' (VC)'
+
+                    # Mark bench players
+                    pos_in_squad = p.get('position_in_squad', 0)
+                    if pos_in_squad > 11:
+                        name = rf"\textcolor{{fplgray}}{{{name}{suffix}}}"
+                    else:
+                        name = rf"{name}{suffix}"
+
+                    player_lines.append(name)
+
+                cell_content = r' \newline '.join(player_lines) if player_lines else '-'
+                pos_row_parts.append(cell_content)
+
+            squad_sections.append(' & '.join(pos_row_parts) + r' \\')
+
+        squad_table = '\n\\midrule\n'.join(squad_sections)
+
+        # Build column spec for teams
+        num_teams = len(competitive_data)
+        team_header_parts = []
+        for e in competitive_data:
+            team_info = e.get('team_info', {})
+            team_name = self._escape_latex(team_info.get('team_name', 'Team'))
+            team_header_parts.append(rf"\textbf{{{team_name}}}")
+        team_headers = ' & '.join(team_header_parts)
+
+        # Calculate column width for squad table based on number of teams
+        squad_col_width = max(1.8, 13.0 / (num_teams + 1))
+        # Build column spec for squad table (e.g., l|p{2.0cm}|p{2.0cm}|...)
+        squad_col_spec = 'l|' + '|'.join([f'p{{{squad_col_width:.1f}cm}}' for _ in range(num_teams)])
+
+        return rf"""
 \subsection{{Squad Comparison (GW{self.gameweek})}}
 
 Current squad selections across all teams. Bench players shown in gray.
@@ -3694,13 +3704,13 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
         return '\n'.join(sections)
 
     def generate_top_global_teams(self) -> str:
-        """Generate section showing top 5 globally-ranked FPL managers.
+        """Generate section showing top globally-ranked FPL managers.
         
         Returns:
             LaTeX string for the top global teams analysis section.
         """
         try:
-            top_teams = get_top_global_teams(n=5)
+            top_teams = get_top_global_teams(n=TOP_GLOBAL_COUNT)
             
             if not top_teams:
                 return ""
@@ -3721,7 +3731,7 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
 \newpage
 \section{{Top Global Managers}}
 
-\textit{{Learn from the best - these are the current top 5 ranked FPL managers globally.}}
+\textit{{Learn from the best - these are the current top {TOP_GLOBAL_COUNT} ranked FPL managers globally.}}
 
 \begin{{center}}
 \begin{{tabular}}{{c|l|l|r}}
@@ -3746,7 +3756,7 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
             return ""
 
     def generate_global_competitive_analysis(self, top_global_data: List[Dict]) -> str:
-        """Generate full competitive analysis comparing user vs top 5 global managers.
+        """Generate full competitive analysis comparing user vs top global managers.
         
         Args:
             top_global_data: List of dicts with team_info, gw_history, squad, season_history.
@@ -3801,12 +3811,17 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
                 treemap_rows.append(treemap_sections[i])
         
         treemap_content = '\n\n\\vspace{0.5cm}\n\n'.join(treemap_rows)
+
+        # Reuse the same transfer + squad section builders as the mini-league competitive section
+        transfer_content = self._generate_transfer_activity_section(top_global_data)
+        squad_evolution_content = self._generate_transfer_history_section(top_global_data)
+        squad_comparison_content = self._generate_squad_comparison_section(top_global_data)
         
         return rf"""
 \newpage
-\section{{Benchmarking: Top 5 Global Managers}}
+\section{{Benchmarking: Top {TOP_GLOBAL_COUNT} Global Managers}}
 
-\textit{{See how your team compares to the 5 best managers in the world. Learn from their strategies.}}
+\textit{{See how your team compares to the top {TOP_GLOBAL_COUNT} managers in the world. Learn from their strategies.}}
 
 \subsection{{Summary Comparison}}
 
@@ -3839,6 +3854,14 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
 \subsection{{Player Contribution Treemaps}}
 
 {treemap_content}
+
+\vspace{{0.5cm}}
+
+{transfer_content}
+
+{squad_evolution_content}
+
+{squad_comparison_content}
 
 \subsection{{Key Insights}}
 \begin{{itemize}}
