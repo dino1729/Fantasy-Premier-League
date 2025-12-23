@@ -28,6 +28,8 @@ from scraping.fpl_api import (
 )
 from etl.fetchers import ClubEloFetcher, FixtureDifficultyCalculator, FPLFetcher as ETLFPLFetcher
 from .cache_manager import CacheManager, cached
+from .session_cache import SessionCacheManager
+from utils.config import SEASON as DEFAULT_SEASON
 
 
 class FPLDataFetcher:
@@ -35,7 +37,9 @@ class FPLDataFetcher:
 
     POSITION_MAP = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
 
-    def __init__(self, team_id: int, season: str = "2025-26", use_cache: bool = True):
+    def __init__(self, team_id: int, season: str = None, use_cache: bool = True, session_cache: Optional['SessionCacheManager'] = None):
+        if season is None:
+            season = DEFAULT_SEASON
         self.team_id = team_id
         self.season = season
         self.base_path = Path(__file__).parent.parent.parent / "data" / season
@@ -59,8 +63,11 @@ class FPLDataFetcher:
             logger.warning(f"FixtureDifficultyCalculator initialization failed: {e}")
             self._difficulty_calculator = None
         
-        # Initialize cache manager
-        self.cache = CacheManager(enabled=use_cache)
+        # Initialize cache manager (use session cache if provided, otherwise fall back to legacy CacheManager)
+        if session_cache is not None:
+            self.cache = session_cache
+        else:
+            self.cache = CacheManager(enabled=use_cache)
 
     @property
     def bootstrap_data(self) -> Dict:
@@ -579,9 +586,10 @@ class FPLDataFetcher:
 
 def build_competitive_dataset(
     entry_ids: List[int],
-    season: str = "2025-26",
+    season: str = None,
     gameweek: Optional[int] = None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> List[Dict]:
     """Build competitive dataset for multiple FPL entries.
 
@@ -590,8 +598,12 @@ def build_competitive_dataset(
 
     Args:
         entry_ids: List of FPL entry/team IDs to compare.
-        season: Season folder name (default: 2025-26).
+        season: Season folder name (default from config).
         gameweek: Specific gameweek for squad snapshot. If None, uses current.
+    """
+    if season is None:
+        season = DEFAULT_SEASON
+    """
 
     Returns:
         List of dictionaries, one per entry, containing:
@@ -607,8 +619,8 @@ def build_competitive_dataset(
         - gw_transfers: Dict (transfer activity for current GW vs prior GW)
         - transfer_history: Dict (transfer history over past 5 GWs with visual data)
     """
-    # Create a cache manager for competitive data
-    cache = CacheManager(enabled=use_cache)
+    # Create a cache manager for competitive data (use session cache if provided)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try to get entire dataset from cache
     cache_key_args = tuple(sorted(entry_ids))
@@ -619,7 +631,7 @@ def build_competitive_dataset(
     results = []
 
     for entry_id in entry_ids:
-        fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache)
+        fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache, session_cache=session_cache)
 
         # Determine gameweek
         gw = gameweek or fetcher.get_current_gameweek()
@@ -666,7 +678,7 @@ def build_competitive_dataset(
 
         # Get transfer activity for current GW vs prior GW
         try:
-            gw_transfers = compute_gw_transfers(entry_id, gw, season, use_cache)
+            gw_transfers = compute_gw_transfers(entry_id, gw, season, use_cache, session_cache)
         except Exception:
             gw_transfers = {
                 'transfers_in': [],
@@ -682,7 +694,7 @@ def build_competitive_dataset(
 
         # Get transfer history for past 5 GWs (for visual progression)
         try:
-            transfer_history = compute_transfer_history(entry_id, gw, num_gws=5, season=season, use_cache=use_cache)
+            transfer_history = compute_transfer_history(entry_id, gw, num_gws=5, season=season, use_cache=use_cache, session_cache=session_cache)
         except Exception:
             transfer_history = {
                 'current_xi': [],
@@ -717,7 +729,8 @@ def get_league_entry_ids(
     league_id: int,
     sample_n: int,
     focus_entry_id: Optional[int] = None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> List[int]:
     """Get entry IDs from a classic league, sampling around focus_entry or from the top.
 
@@ -731,7 +744,7 @@ def get_league_entry_ids(
     Returns:
         List of entry IDs from the league.
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try cache first
     cache_key = ('league_entries', league_id, sample_n, focus_entry_id)
@@ -824,7 +837,8 @@ def get_league_entry_ids(
 
 def get_top_global_teams(
     n: int = 5,
-    use_cache: bool = True
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> List[Dict]:
     """Get the top N teams from the overall FPL league.
     
@@ -835,7 +849,7 @@ def get_top_global_teams(
     Returns:
         List of dicts with entry_id, manager_name, team_name, total_points, rank
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try cache first
     cached = cache.get('top_global_teams', n)
@@ -868,7 +882,7 @@ def get_top_global_teams(
         return []
 
 
-def get_bgw_dgw_gameweeks(use_cache: bool = True) -> Dict:
+def get_bgw_dgw_gameweeks(use_cache: bool = True, session_cache: Optional['SessionCacheManager'] = None) -> Dict:
     """Detect Blank Gameweeks (BGW) and Double Gameweeks (DGW) from fixtures.
     
     A BGW occurs when some teams have no fixtures in a gameweek.
@@ -883,7 +897,7 @@ def get_bgw_dgw_gameweeks(use_cache: bool = True) -> Dict:
         - dgw: List of {gw, teams_doubled, count}
         - normal: List of normal GW numbers
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     cached = cache.get('bgw_dgw_info')
     if cached is not None:
@@ -950,7 +964,8 @@ def get_bgw_dgw_gameweeks(use_cache: bool = True) -> Dict:
 def compute_league_ownership(
     entry_ids: List[int],
     gw: int,
-    use_cache: bool = True
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> Dict:
     """Compute player ownership percentages within a set of league entries.
 
@@ -966,7 +981,7 @@ def compute_league_ownership(
             - sample_size: number of entries analyzed
             - top_owned: List of (player_id, ownership) sorted by ownership desc
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try cache first
     cache_key_args = tuple(sorted(entry_ids))
@@ -1038,8 +1053,9 @@ def compute_league_ownership(
 def compute_gw_transfers(
     entry_id: int,
     current_gw: int,
-    season: str = "2025-26",
-    use_cache: bool = True
+    season: str = None,
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> Dict:
     """Compute transfers made between prior GW and current GW for an entry.
 
@@ -1049,8 +1065,12 @@ def compute_gw_transfers(
     Args:
         entry_id: FPL entry/team ID.
         current_gw: Current gameweek to analyze.
-        season: Season folder name.
+        season: Season folder name (default from config).
         use_cache: Whether to use caching.
+    """
+    if season is None:
+        season = DEFAULT_SEASON
+    """
 
     Returns:
         Dict containing:
@@ -1064,14 +1084,14 @@ def compute_gw_transfers(
             - is_free_hit: bool (whether FH was used)
             - num_changes: int (total number of players changed)
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try cache first
     cached = cache.get('gw_transfers', entry_id, current_gw)
     if cached is not None:
         return cached
 
-    fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache)
+    fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache, session_cache=session_cache)
     
     result = {
         'transfers_in': [],
@@ -1241,8 +1261,9 @@ def compute_transfer_history(
     entry_id: int,
     current_gw: int,
     num_gws: int = 5,
-    season: str = "2025-26",
-    use_cache: bool = True
+    season: str = None,
+    use_cache: bool = True,
+    session_cache: Optional['SessionCacheManager'] = None
 ) -> Dict:
     """Compute transfer history over multiple gameweeks for an entry.
 
@@ -1253,8 +1274,12 @@ def compute_transfer_history(
         entry_id: FPL entry/team ID.
         current_gw: Current gameweek.
         num_gws: Number of gameweeks to look back.
-        season: Season folder name.
+        season: Season folder name (default from config).
         use_cache: Whether to use caching.
+    """
+    if season is None:
+        season = DEFAULT_SEASON
+    """
 
     Returns:
         Dict containing:
@@ -1264,14 +1289,14 @@ def compute_transfer_history(
             - player_history: Dict[player_id] -> {joined_gw, left_gw, is_current}
             - chips_timeline: Dict[gw] -> chip_name
     """
-    cache = CacheManager(enabled=use_cache)
+    cache = session_cache if session_cache is not None else CacheManager(enabled=use_cache)
     
     # Try cache first
     cached = cache.get('transfer_history', entry_id, current_gw, num_gws)
     if cached is not None:
         return cached
 
-    fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache)
+    fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache, session_cache=session_cache)
     position_map = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
     
     result = {

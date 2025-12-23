@@ -27,31 +27,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
-import yaml
 
 # Project root
 PROJECT_ROOT = Path(__file__).parent
 
-
-def load_config() -> dict:
-    """Load configuration from config.yml in project root.
-    
-    Returns:
-        Dict with config values or empty dict if not found.
-    """
-    config_path = PROJECT_ROOT / 'config.yml'
-    if config_path.exists():
-        try:
-            with open(config_path, 'r') as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            return {}
-    return {}
-
-
-# Load config at module level
-_CONFIG = load_config()
-DEFAULT_TEAM_ID = _CONFIG.get('team_id', 847569)
+# Import centralized configuration
+from utils.config import TEAM_ID as DEFAULT_TEAM_ID
 
 # Configure logging
 logging.basicConfig(

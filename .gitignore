@@ -34,3 +34,8 @@ reports/report_*.fdb_latexmk
 # Data files - ignore all data
 data/
 models/artifacts
+
+docs/*.md
+docs/*.pdf
+
+.cursor

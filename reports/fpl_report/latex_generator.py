@@ -6,23 +6,27 @@ Generates comprehensive LaTeX documents for FPL team analysis.
 from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
+import json
 from .data_fetcher import get_bgw_dgw_gameweeks, get_top_global_teams
+from utils.config import SEASON as DEFAULT_SEASON
 
 
 class LaTeXReportGenerator:
     """Generates LaTeX report documents for FPL analysis."""
 
-    def __init__(self, team_id: int, gameweek: int, plot_dir: Optional[Path] = None):
+    def __init__(self, team_id: int, gameweek: int, plot_dir: Optional[Path] = None, session_cache=None):
         """Initialize the generator.
 
         Args:
             team_id: FPL team ID.
             gameweek: Current gameweek number.
             plot_dir: Directory containing generated plots.
+            session_cache: Optional SessionCacheManager instance.
         """
         self.team_id = team_id
         self.gameweek = gameweek
         self.plot_dir = plot_dir
+        self.session_cache = session_cache
 
     def generate_preamble(self) -> str:
         """Generate LaTeX document preamble with packages and styling."""
@@ -38,6 +42,8 @@ class LaTeXReportGenerator:
 \usepackage{pgfplots}
 \usepackage{pgf-pie}
 \usepackage{booktabs}
+\usepackage{caption}
+\usepackage{amssymb}
 \usepackage{tabularx}
 \usepackage{colortbl}
 \usepackage{fancyhdr}
@@ -84,7 +90,7 @@ class LaTeXReportGenerator:
 \fancyfoot[C]{{\thepage}}
 \renewcommand{{\headrulewidth}}{{2pt}}
 \renewcommand{{\headrule}}{{\hbox to\headwidth{{\color{{fplgreen}}\leaders\hrule height \headrulewidth\hfill}}}}
-\setlength{{\headheight}}{{14pt}}
+\setlength{{\headheight}}{{24pt}}
 
 \begin{{document}}
 """
@@ -95,7 +101,7 @@ class LaTeXReportGenerator:
         manager = team_info.get('manager_name', 'Unknown')
         total_points = team_info.get('overall_points', 0)
         overall_rank = team_info.get('overall_rank', 0)
-        season = team_info.get('season', '2025-26')
+        season = team_info.get('season', DEFAULT_SEASON)
 
         # Format rank with commas
         rank_str = f"{overall_rank:,}" if overall_rank else "N/A"
@@ -169,15 +175,18 @@ class LaTeXReportGenerator:
         chips_used = chips_used or []
         transfers = transfers or []
         chips_available = 5 - len(chips_used)
-        total_transfers = len(transfers)
-
-        # Calculate free transfers (new rules 2025-26)
-        # - Start with 1 FT for GW2 (GW1 unlimited)
-        # - +1 per GW, cap at 5
-        # - Used transfers subtract from balance
-        # - WC/FH reset balance to 1 for next GW
         
-        ft_balance = 1 # Balance available for GW2
+        # Count only regular transfers (exclude WC/FH transfers - those don't count against FTs)
+        chip_gws = {c['event'] for c in chips_used if c.get('name') in ('wildcard', 'freehit')}
+        total_transfers = len([t for t in transfers if t.get('event') not in chip_gws])
+
+        # Calculate free transfers (2025-26 rules)
+        # Rules:
+        # - GW1: Unlimited transfers (pre-season)
+        # - GW2+: Start with 1 FT, +1 per unused GW, cap at 5
+        # - WC/FH: Don't consume FTs, but reset to 1 for NEXT GW
+        #
+        # We show FT balance going INTO the current GW (what user had available)
         
         if gw_history:
             # Create chip usage map
@@ -186,38 +195,40 @@ class LaTeXReportGenerator:
             # Sort history by event
             sorted_history = sorted(gw_history, key=lambda x: x['event'])
             
-            # Find the last processed GW
-            last_gw = sorted_history[-1]['event']
+            # Find the current GW (last in history)
+            current_gw = sorted_history[-1]['event']
             
-            # Iterate from GW2 to last_gw to simulate FT accumulation
-            # Note: We need to process up to last_gw to determine balance for NEXT GW
+            # Calculate FT balance going INTO the current GW
+            # We iterate from GW2 up to (but not including) current_gw
+            current_simulated_ft = 1  # Start with 1 FT available for GW2
             
-            current_simulated_ft = 1 # Start with 1 FT available for GW2
-            
-            # If last_gw < 2, loop won't run, correctly leaving 1 FT for GW2
-            for gw in range(2, last_gw + 1):
-                # Find history for this GW
-                gw_data = next((g for g in sorted_history if g['event'] == gw), None)
-                
-                # Check if chip used in THIS GW
-                chip = chip_usage.get(gw)
-                
-                if chip in ['wildcard', 'freehit']:
-                    # Chip used: Transfers don't cost FTs.
-                    # Balance for NEXT week (gw+1) resets to 1.
-                    current_simulated_ft = 1
-                else:
-                    # Regular GW: Deduct transfers used
-                    transfers_made = gw_data.get('event_transfers', 0) if gw_data else 0
+            if current_gw == 1:
+                # GW1: Unlimited transfers
+                free_transfers = "Unlimited"
+            else:
+                # Calculate FT accumulated up to the current GW
+                for gw in range(2, current_gw):
+                    # Find history for this GW
+                    gw_data = next((g for g in sorted_history if g['event'] == gw), None)
                     
-                    current_simulated_ft -= transfers_made
-                    current_simulated_ft = max(0, current_simulated_ft)
+                    # Check if chip used in THIS GW
+                    chip = chip_usage.get(gw)
                     
-                    # Add 1 for next week
-                    current_simulated_ft += 1
-                    current_simulated_ft = min(5, current_simulated_ft)
-            
-            free_transfers = str(current_simulated_ft)
+                    if chip in ['wildcard', 'freehit']:
+                        # Chip used: FT resets to 1 for the following week
+                        current_simulated_ft = 1
+                    else:
+                        # Regular GW: Deduct transfers used, then accumulate for next week
+                        transfers_made = gw_data.get('event_transfers', 0) if gw_data else 0
+                        
+                        current_simulated_ft -= transfers_made
+                        current_simulated_ft = max(0, current_simulated_ft)
+                        
+                        # Add 1 for next week, cap at 5
+                        current_simulated_ft += 1
+                        current_simulated_ft = min(5, current_simulated_ft)
+                
+                free_transfers = str(current_simulated_ft)
         else:
             # Pre-season
             free_transfers = "Unlimited"
@@ -438,13 +449,6 @@ Bank Balance & \pounds{bank:.1f}m \\
 
         # If season_history is available, calculate contributing points (only starting XI with captain multipliers)
         if season_history:
-            # Build a map of player name to position from squad_analysis
-            player_positions = {}
-            for player in squad_analysis:
-                name = player.get('name', '')
-                pos = player.get('position', 'UNK')
-                player_positions[name] = pos
-            
             # Calculate contributing points per player
             for gw_entry in season_history:
                 squad = gw_entry.get('squad', [])
@@ -452,15 +456,14 @@ Bank Balance & \pounds{bank:.1f}m \\
                     # Only count if in starting XI (position_in_squad <= 11)
                     position_in_squad = player.get('position_in_squad', 0)
                     if position_in_squad <= 11:
-                        name = player.get('name', 'Unknown')
                         base_points = player.get('stats', {}).get('event_points', 0) or 0
                         
                         # Apply captain multiplier (2 for captain, 3 for triple captain)
                         multiplier = player.get('multiplier', 1)
                         points = base_points * multiplier
                         
-                        # Get player's position
-                        pos = player_positions.get(name, 'UNK')
+                        # Get player's position directly from season_history (includes historical players)
+                        pos = player.get('position', 'UNK')
                         if pos in position_points:
                             position_points[pos] += points
         else:
@@ -842,6 +845,9 @@ The table includes performance stats, expected metrics, ICT analysis, and peer c
             
             sections.append(self._generate_position_table(players, pos_name))
         
+        # Add advanced finishing & creativity visualizations section
+        sections.append(self._generate_advanced_finishing_creativity_section())
+        
         return '\n'.join(sections)
 
     def _generate_position_table(self, players: List[Dict], position_name: str) -> str:
@@ -911,6 +917,661 @@ The table includes performance stats, expected metrics, ICT analysis, and peer c
 
 \vspace{{0.5cm}}
 """)
+        
+        return '\n'.join(sections)
+
+    def _generate_advanced_finishing_creativity_section(self) -> str:
+        """Generate advanced finishing and creativity visualization section.
+        
+        Includes Clinical/Wasteful goals, Clutch/Frustrated assists, and Usage vs Output plots.
+        """
+        sections = []
+        sections.append(r"\newpage")
+        sections.append(r"\subsection{Advanced Finishing \& Creativity Analysis}")
+        sections.append(r"""
+\small
+
+This section provides visual analysis of your squad's finishing efficiency and creative output
+compared to league-wide performance. Charts show both single-gameweek and season-cumulative metrics,
+with your squad players highlighted in bold.
+
+\vspace{0.3cm}
+""")
+        
+        # Clinical vs Wasteful Goals
+        sections.append(r"\subsubsection{Clinical vs Wasteful: Goals}")
+        sections.append(r"""
+\small
+Green bars indicate clinical finishers (Goals > xG), while red bars show wasteful players (Goals < xG).
+Your squad players are highlighted in bold.
+
+\vspace{0.3cm}
+""")
+        
+        # Check if plots exist
+        clinical_gw_path = self.plot_dir / 'clinical_wasteful_gw.png'
+        clinical_season_path = self.plot_dir / 'clinical_wasteful_season.png'
+        
+        if clinical_gw_path.exists() and clinical_season_path.exists():
+            sections.append(r"""
+\begin{center}
+\begin{minipage}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{plots/clinical_wasteful_gw.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{plots/clinical_wasteful_season.png}
+\end{minipage}
+\end{center}
+
+\vspace{0.5cm}
+""")
+        
+        # Clutch vs Frustrated Assists
+        sections.append(r"\subsubsection{Clutch vs Frustrated: Assists}")
+        sections.append(r"""
+\small
+Green bars indicate clutch playmakers (Assists > xA), while red bars show frustrated creators (Assists < xA).
+
+\vspace{0.3cm}
+""")
+        
+        clutch_gw_path = self.plot_dir / 'clutch_frustrated_gw.png'
+        clutch_season_path = self.plot_dir / 'clutch_frustrated_season.png'
+        
+        if clutch_gw_path.exists() and clutch_season_path.exists():
+            sections.append(r"""
+\begin{center}
+\begin{minipage}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{plots/clutch_frustrated_gw.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{plots/clutch_frustrated_season.png}
+\end{minipage}
+\end{center}
+
+\vspace{0.5cm}
+""")
+        
+        # Usage vs Output Scatter
+        sections.append(r"\subsubsection{Usage vs Output Analysis}")
+        
+        # Info Box (How To Read)
+        sections.append(r"""
+\begin{center}
+\fbox{
+\begin{minipage}{0.9\textwidth}
+\textbf{HOW TO READ THIS CHART}
+\small
+\begin{itemize}
+    \item \textbf{Usage (X):} Shots + Box Touches per 90
+    \item \textbf{Output (Y):} Goals + Assists
+    \item \textbf{Bubble:} xGI (expected involvement)
+    \item \textbf{Color:} DEF/MID/FWD (outline + bold = your squad)
+    \item \textbf{GW Range:} Shown in title (e.g. GW1-17, GW12-17 last 5)
+    \item \textbf{Quadrants:} ELITE (high/high); VOLUME (high use, low returns - buy); CLINICAL (low use, high returns - sell watch); AVOID (low/low)
+\end{itemize}
+\end{minipage}
+}
+\end{center}
+""")
+        
+        usage_league_path = self.plot_dir / 'usage_output_scatter.png'
+        usage_squad_path = self.plot_dir / 'usage_output_scatter_squad.png'
+        usage_recent_path = self.plot_dir / 'usage_output_scatter_last5.png'
+        usage_recent_squad_path = self.plot_dir / 'usage_output_scatter_last5_squad.png'
+        usage_summary_path = self.plot_dir / 'usage_output_summary.json'
+        
+        if usage_league_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.85\linewidth]{plots/usage_output_scatter.png} \\
+\textit{League-wide Context (Squad highlighted in bold)}
+\end{center}
+""")
+
+        if usage_squad_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.85\linewidth]{plots/usage_output_scatter_squad.png} \\
+\textit{Squad-only View}
+\end{center}
+""")
+
+        if usage_recent_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.85\linewidth]{plots/usage_output_scatter_last5.png} \\
+\textit{League-wide Recent Form (Last 5 GWs, Top 25 attackers)}
+\end{center}
+""")
+
+        if usage_recent_squad_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.85\linewidth]{plots/usage_output_scatter_last5_squad.png} \\
+\textit{Squad-only Recent Form (Last 5 GWs)}
+\end{center}
+""")
+
+        # Summary tables + insights (if available)
+        if usage_summary_path.exists():
+            try:
+                summary_data = json.loads(usage_summary_path.read_text())
+            except Exception:
+                summary_data = {}
+
+            def render_table(key: str, title: str):
+                payload = summary_data.get(key)
+                if not payload:
+                    return ""
+                rows = payload.get('rows', [])
+                if not rows:
+                    return ""
+                table_lines = [r"\begin{center}",
+                               r"\begin{tabular}{l c c c c c}",
+                               r"\toprule",
+                               r"\textbf{Player} & \textbf{Pos} & \textbf{Use/90} & \textbf{G{+}A} & \textbf{xGI} & \textbf{Pts} \\",
+                               r"\midrule"]
+                for row in rows:
+                    table_lines.append(
+                        rf"{row.get('name','-')} & {row.get('pos','-')} & {row.get('usage_per_90',0)} & {row.get('ga',0)} & {row.get('xgi',0)} & {row.get('pts',0)} \\"
+                    )
+                table_lines.extend([r"\bottomrule", r"\end{tabular}", r"\end{center}", r"\vspace{6pt}"])
+                insights = payload.get('insights', [])
+                insight_lines = []
+                if insights:
+                    insight_lines.append(r"\begin{itemize}")
+                    for item in insights:
+                        insight_lines.append(rf"    \item {item}")
+                    insight_lines.append(r"\end{itemize}")
+                range_text = payload.get('range_label', '')
+                header_line = rf"\textbf{{{title}}} ({range_text})"
+                return "\n".join([header_line, *table_lines, *insight_lines])
+
+            season_block = render_table('season', 'Top Attackers - Season')
+            recent_block = render_table('last5', 'Top Attackers - Last 5 GWs')
+
+            if season_block or recent_block:
+                sections.append(r"\vspace{0.5cm}")
+                sections.append(r"\subsubsection{Usage vs Output Tables}")
+                
+                # Place tables side-by-side if both exist
+                if season_block and recent_block:
+                    sections.append(r"\noindent")
+                    sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                    sections.append(season_block)
+                    sections.append(r"\end{minipage}")
+                    sections.append(r"\hfill")
+                    sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                    sections.append(recent_block)
+                    sections.append(r"\end{minipage}")
+                else:
+                    # Single table - use full width
+                    if season_block:
+                        sections.append(season_block)
+                    if recent_block:
+                        sections.append(recent_block)
+
+            def render_categories(key: str, title: str):
+                payload = summary_data.get(key)
+                if not payload:
+                    return []
+                categories = payload.get('categories', {})
+                if not categories:
+                    return []
+                tables = []
+                def render_single(cat_key, cat_label):
+                    entries = categories.get(cat_key, [])
+                    if not entries:
+                        return ""
+                    # Use smaller font and tighter spacing for side-by-side layout
+                    lines = [
+                        rf"\textbf{{{cat_label}}} ({payload.get('range_label','')})",
+                        r"\begin{center}",
+                        r"{\scriptsize",
+                        r"\setlength{\tabcolsep}{2pt}",
+                        r"\renewcommand{\arraystretch}{0.95}",
+                        r"\resizebox{\linewidth}{!}{%",
+                        r"\begin{tabular}{l c c c c c}",
+                        r"\toprule",
+                        r"\textbf{Player} & \textbf{Pos} & \textbf{Use/90} & \textbf{G{+}A} & \textbf{xGI} & \textbf{Pts} \\",
+                        r"\midrule",
+                    ]
+                    for e in entries:
+                        lines.append(
+                            rf"{e.get('name','-')} & {e.get('pos','-')} & {e.get('usage_per_90',0)} & {e.get('ga',0)} & {e.get('xgi',0)} & {e.get('pts',0)} \\"
+                        )
+                    lines.extend([r"\bottomrule", r"\end{tabular}", r"}%", r"}", r"\end{center}"])
+                    return "\n".join(lines)
+                for cat_key, cat_label in [('elite', 'ELITE (Keep)'), ('volume', 'VOLUME (Buy)'), ('clinical', 'CLINICAL (Sell Watch)')]:
+                    block = render_single(cat_key, cat_label)
+                    if block:
+                        tables.append(block)
+                return tables  # Return list instead of joined string
+
+            season_cat = render_categories('season', 'Usage Quadrants - Season')
+            recent_cat = render_categories('last5', 'Usage Quadrants - Last 5 GWs')
+
+            if season_cat or recent_cat:
+                sections.append(r"\vspace{0.4cm}")
+                sections.append(r"\subsubsection{Usage vs Output Quadrants (Tables)}")
+                
+                # Helper function to layout three tables side-by-side
+                def layout_three_tables(tables_list):
+                    if not tables_list:
+                        return
+                    if len(tables_list) == 3:
+                        # All three tables - place side-by-side
+                        sections.append(r"\noindent")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[0])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[1])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[2])
+                        sections.append(r"\end{minipage}")
+                    elif len(tables_list) == 2:
+                        # Two tables - place side-by-side with more width
+                        sections.append(r"\noindent")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(tables_list[0])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(tables_list[1])
+                        sections.append(r"\end{minipage}")
+                    else:
+                        # Single table - use full width
+                        sections.append(tables_list[0])
+                    sections.append(r"\vspace{0.5cm}")
+                
+                if season_cat:
+                    layout_three_tables(season_cat)
+                if recent_cat:
+                    layout_three_tables(recent_cat)
+        
+        # Defensive Value Charts Section
+        sections.append(r"\newpage")
+        sections.append(r"\subsection{Defensive Value Charts}")
+        
+        # Info Box (How To Read)
+        sections.append(r"""
+\begin{tcolorbox}[colback=white,colframe=fplgreen!70!black,title=\textbf{How To Read This Chart},fonttitle=\small,boxrule=0.5pt,left=5pt,right=5pt,top=3pt,bottom=3pt]
+\small
+\begin{itemize}[leftmargin=*,nosep]
+\item[$\rightarrow$] \textbf{X-Axis (Defensive Actions):} Tackles + Interceptions + Clearances + Blocks per 90 mins
+\item[$\rightarrow$] \textbf{Y-Axis (Points):} Total FPL points over the period
+\item[$\rightarrow$] \textbf{Bubble Size:} Price efficiency (pts/\pounds m) - bigger = better value
+\item[$\rightarrow$] \textbf{Top-Right (ELITE):} High defensive activity AND high points - the complete defender package
+\item[$\rightarrow$] \textbf{Bottom-Right (VOLUME):} High activity but low points - buy signal if clean sheets improve
+\item[$\rightarrow$] \textbf{Top-Left (CS MERCHANTS):} Low activity but high points - riding clean sheets, fixture dependent
+\end{itemize}
+\end{tcolorbox}
+\vspace{0.5cm}
+""")
+        
+        # Recent Form (Last 5 Games)
+        sections.append(r"\subsubsection{Last 5 Games (Recent Form)}")
+        if (self.plot_dir / 'defensive_value_scatter_last5.png').exists():
+            sections.append(rf"""
+\begin{{center}}
+\includegraphics[width=0.95\textwidth]{{{self.plot_dir}/defensive_value_scatter_last5.png}}
+\end{{center}}
+\vspace{{0.3cm}}
+""")
+        else:
+            sections.append(r"\textit{Defensive value plot (recent form) not available.}")
+        
+        # Full Season
+        sections.append(r"\subsubsection{Full Season (Baseline)}")
+        if (self.plot_dir / 'defensive_value_scatter.png').exists():
+            sections.append(rf"""
+\begin{{center}}
+\includegraphics[width=0.95\textwidth]{{{self.plot_dir}/defensive_value_scatter.png}}
+\end{{center}}
+""")
+        else:
+            sections.append(r"\textit{Defensive value plot (season) not available.}")
+        
+        # Defensive Value Tables (similar to attacker tables)
+        def_summary_path = self.plot_dir / 'defensive_value_summary.json'
+        if def_summary_path.exists():
+            try:
+                def_summary = json.loads(def_summary_path.read_text())
+                
+                # Render top defenders table
+                def render_def_table(key, label):
+                    data = def_summary.get(key, {})
+                    rows = data.get('rows', [])
+                    if not rows:
+                        return ""
+                    table_lines = [
+                        rf"\textbf{{{label}}} ({data.get('range_label', '')})",
+                        r"\begin{center}",
+                        r"\begin{tabular}{l c c c c c}",
+                        r"\toprule",
+                        r"\textbf{Player} & \textbf{Def/90} & \textbf{CS} & \textbf{CS\%} & \textbf{Pts/\pounds} & \textbf{Pts} \\",
+                        r"\midrule"
+                    ]
+                    for row in rows[:10]:
+                        table_lines.append(
+                            rf"{row.get('name', '-')} & {row.get('def_per_90', 0)} & {row.get('cs', 0)} & {row.get('cs_pct', 0)}\% & {row.get('pts_per_m', 0)} & {row.get('pts', 0)} \\"
+                        )
+                    table_lines.extend([r"\bottomrule", r"\end{tabular}", r"\end{center}"])
+                    return '\n'.join(table_lines)
+                
+                # Render category tables
+                def render_def_categories(key, label):
+                    data = def_summary.get(key, {})
+                    cats = data.get('categories', {})
+                    if not cats:
+                        return []
+                    
+                    cat_labels = {
+                        'elite': ('ELITE (Keep)', 'High Activity + High Points'),
+                        'volume': ('VOLUME (Buy Signal)', 'High Activity, Low Points'),
+                        'cs_merchants': ('CS MERCHANTS (Fixture Watch)', 'Low Activity, High Points'),
+                    }
+                    
+                    range_label = data.get('range_label', '')
+                    tables = []
+                    
+                    for cat_key, (cat_label, cat_desc) in cat_labels.items():
+                        entries = cats.get(cat_key, [])
+                        if not entries:
+                            continue
+                        lines = [
+                            rf"\textbf{{{cat_label}}} ({range_label})",
+                            r"\begin{center}",
+                            r"{\scriptsize",
+                            r"\setlength{\tabcolsep}{2pt}",
+                            r"\renewcommand{\arraystretch}{0.95}",
+                            r"\resizebox{\linewidth}{!}{%",
+                            r"\begin{tabular}{l c c c c}",
+                            r"\toprule",
+                            r"\textbf{Player} & \textbf{Def/90} & \textbf{CS} & \textbf{CS\%} & \textbf{Pts} \\",
+                            r"\midrule",
+                        ]
+                        for e in entries[:8]:
+                            lines.append(
+                                rf"{e.get('name', '-')} & {e.get('def_per_90', 0)} & {e.get('cs', 0)} & {e.get('cs_pct', 0)}\% & {e.get('pts', 0)} \\"
+                            )
+                        lines.extend([r"\bottomrule", r"\end{tabular}", r"}%", r"}", r"\end{center}"])
+                        tables.append('\n'.join(lines))
+                    
+                    return tables  # Return list instead of joined string
+                
+                # Top Defenders Tables
+                season_table = render_def_table('season', 'Top Defenders - Season')
+                recent_table = render_def_table('last5', 'Top Defenders - Last 5 GWs')
+                
+                if season_table or recent_table:
+                    sections.append(r"\vspace{0.5cm}")
+                    sections.append(r"\subsubsection{Top Defenders Tables}")
+                    
+                    # Place tables side-by-side if both exist
+                    if season_table and recent_table:
+                        sections.append(r"\noindent")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(season_table)
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(recent_table)
+                        sections.append(r"\end{minipage}")
+                    else:
+                        # Single table - use full width
+                        if recent_table:
+                            sections.append(recent_table)
+                        if season_table:
+                            sections.append(season_table)
+                
+                # Category Tables
+                season_cat = render_def_categories('season', 'Defensive Quadrants - Season')
+                recent_cat = render_def_categories('last5', 'Defensive Quadrants - Last 5 GWs')
+                
+                if season_cat or recent_cat:
+                    sections.append(r"\vspace{0.4cm}")
+                    sections.append(r"\subsubsection{Defensive Value Quadrants (Tables)}")
+                    
+                    # Helper function to layout three tables side-by-side
+                    def layout_def_tables(tables_list):
+                        if not tables_list:
+                            return
+                        if len(tables_list) == 3:
+                            # All three tables - place side-by-side
+                            sections.append(r"\noindent")
+                            sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                            sections.append(tables_list[0])
+                            sections.append(r"\end{minipage}")
+                            sections.append(r"\hfill")
+                            sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                            sections.append(tables_list[1])
+                            sections.append(r"\end{minipage}")
+                            sections.append(r"\hfill")
+                            sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                            sections.append(tables_list[2])
+                            sections.append(r"\end{minipage}")
+                        elif len(tables_list) == 2:
+                            # Two tables - place side-by-side with more width
+                            sections.append(r"\noindent")
+                            sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                            sections.append(tables_list[0])
+                            sections.append(r"\end{minipage}")
+                            sections.append(r"\hfill")
+                            sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                            sections.append(tables_list[1])
+                            sections.append(r"\end{minipage}")
+                        else:
+                            # Single table - use full width
+                            sections.append(tables_list[0])
+                        sections.append(r"\vspace{0.5cm}")
+                    
+                    if season_cat:
+                        layout_def_tables(season_cat)
+                    if recent_cat:
+                        layout_def_tables(recent_cat)
+                        
+            except Exception as e:
+                sections.append(rf"\textit{{Could not load defensive summary data: {str(e)[:50]}}}")
+        
+        # Goalkeeper Shot-Stopping Charts Section
+        sections.append(r"\newpage")
+        sections.append(r"\subsection{Goalkeeper Shot-Stopping Charts}")
+        
+        # Info Box (How To Read)
+        sections.append(r"""
+\begin{tcolorbox}[colback=white,colframe=fplgreen!70!black,title=\textbf{How To Read This Chart},fonttitle=\small,boxrule=0.5pt,left=5pt,right=5pt,top=3pt,bottom=3pt]
+\small
+\begin{itemize}[leftmargin=*,nosep]
+\item[$\rightarrow$] \textbf{X-Axis (Goals Prevented):} xGOT faced minus Goals Conceded - positive = outperforming expected
+\item[$\rightarrow$] \textbf{Y-Axis (Points):} Total FPL points over the period
+\item[$\rightarrow$] \textbf{Bubble Size:} Clean sheets - bigger = more clean sheets
+\item[$\rightarrow$] \textbf{Top-Right (ELITE):} Making saves AND getting points - the premium GK picks
+\item[$\rightarrow$] \textbf{Bottom-Right (UNLUCKY):} Good shot stopping but low points - could bounce back with better fixtures
+\item[$\rightarrow$] \textbf{Top-Left (PROTECTED):} Low shots faced, high points - riding good defence, fixture dependent
+\end{itemize}
+\end{tcolorbox}
+\vspace{0.5cm}
+""")
+        
+        gk_recent_path = self.plot_dir / 'goalkeeper_value_scatter_last5.png'
+        gk_season_path = self.plot_dir / 'goalkeeper_value_scatter.png'
+        
+        # Recent Form (Last 5 Games)
+        sections.append(r"\subsubsection{Last 5 Games (Recent Form)}")
+        if gk_recent_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.95\textwidth]{plots/goalkeeper_value_scatter_last5.png}
+\end{center}
+\vspace{0.3cm}
+""")
+        else:
+            sections.append(r"\textit{Goalkeeper plot (recent form) not available.}")
+        
+        # Full Season
+        sections.append(r"\subsubsection{Full Season (Baseline)}")
+        if gk_season_path.exists():
+            sections.append(r"""
+\begin{center}
+\includegraphics[width=0.95\textwidth]{plots/goalkeeper_value_scatter.png}
+\end{center}
+""")
+        else:
+            sections.append(r"\textit{Goalkeeper plot (season) not available.}")
+
+        # Goalkeeper tables (if summary available)
+        gk_summary_path = self.plot_dir / 'goalkeeper_value_summary.json'
+        if gk_summary_path.exists():
+            try:
+                gk_summary = json.loads(gk_summary_path.read_text())
+            except Exception:
+                gk_summary = {}
+
+            def render_gk_table(key: str, title: str) -> str:
+                payload = gk_summary.get(key)
+                if not payload:
+                    return ""
+                rows = payload.get('rows', [])
+                if not rows:
+                    return ""
+                range_text = payload.get('range_label', '')
+                lines = [
+                    rf"\textbf{{{title}}} ({range_text})",
+                    r"\begin{center}",
+                    r"{\small",
+                    r"\setlength{\tabcolsep}{3pt}",
+                    r"\renewcommand{\arraystretch}{1.0}",
+                    r"\resizebox{\linewidth}{!}{%",
+                    r"\begin{tabular}{l c c c c}",
+                    r"\toprule",
+                    r"\textbf{Player} & \textbf{GP} & \textbf{Save\%} & \textbf{CS} & \textbf{Pts} \\",
+                    r"\midrule",
+                ]
+                for row in rows[:10]:
+                    lines.append(
+                        rf"{row.get('name','-')} & {row.get('gp',0)} & {row.get('save_pct',0)}\% & {row.get('cs',0)} & {row.get('pts',0)} \\"
+                    )
+                lines.extend([r"\bottomrule", r"\end{tabular}", r"}%", r"}", r"\end{center}"])
+                return "\n".join(lines)
+
+            season_table = render_gk_table('season', 'Top Goalkeepers - Season')
+            recent_table = render_gk_table('last5', 'Top Goalkeepers - Last 5 Games')
+
+            if season_table or recent_table:
+                sections.append(r"\vspace{0.4cm}")
+                sections.append(r"\subsubsection{Top Goalkeepers Tables}")
+                if season_table and recent_table:
+                    sections.append(r"\noindent")
+                    sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                    sections.append(season_table)
+                    sections.append(r"\end{minipage}")
+                    sections.append(r"\hfill")
+                    sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                    sections.append(recent_table)
+                    sections.append(r"\end{minipage}")
+                else:
+                    if season_table:
+                        sections.append(season_table)
+                    if recent_table:
+                        sections.append(recent_table)
+
+            def render_gk_categories(key: str):
+                payload = gk_summary.get(key)
+                if not payload:
+                    return []
+                categories = payload.get('categories', {})
+                if not categories:
+                    return []
+                range_label = payload.get('range_label', '')
+                tables = []
+
+                def render_single(cat_key: str, cat_label: str) -> str:
+                    entries = categories.get(cat_key, [])
+                    if not entries:
+                        return ""
+                    lines = [
+                        rf"\textbf{{{cat_label}}} ({range_label})",
+                        r"\begin{center}",
+                        r"{\scriptsize",
+                        r"\setlength{\tabcolsep}{2pt}",
+                        r"\renewcommand{\arraystretch}{0.95}",
+                        r"\resizebox{\linewidth}{!}{%",
+                        r"\begin{tabular}{l c c c c}",
+                        r"\toprule",
+                        r"\textbf{Player} & \textbf{GP} & \textbf{Save\%} & \textbf{CS} & \textbf{Pts} \\",
+                        r"\midrule",
+                    ]
+                    for e in entries[:8]:
+                        lines.append(
+                            rf"{e.get('name','-')} & {e.get('gp',0)} & {e.get('save_pct',0)}\% & {e.get('cs',0)} & {e.get('pts',0)} \\"
+                        )
+                    lines.extend([r"\bottomrule", r"\end{tabular}", r"}%", r"}", r"\end{center}"])
+                    return "\n".join(lines)
+
+                for cat_key, cat_label in [
+                    ('elite', 'ELITE (Premium Picks)'),
+                    ('protected', 'PROTECTED (Good Defence)'),
+                    ('unlucky', 'UNLUCKY (Due Points)'),
+                ]:
+                    block = render_single(cat_key, cat_label)
+                    if block:
+                        tables.append(block)
+                return tables
+
+            season_cat = render_gk_categories('season')
+            recent_cat = render_gk_categories('last5')
+
+            if season_cat or recent_cat:
+                sections.append(r"\vspace{0.4cm}")
+                sections.append(r"\subsubsection{Goalkeeper Shot-Stopping Quadrants (Tables)}")
+
+                def layout_three(tables_list):
+                    if not tables_list:
+                        return
+                    if len(tables_list) == 3:
+                        sections.append(r"\noindent")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[0])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[1])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.31\textwidth}")
+                        sections.append(tables_list[2])
+                        sections.append(r"\end{minipage}")
+                    elif len(tables_list) == 2:
+                        sections.append(r"\noindent")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(tables_list[0])
+                        sections.append(r"\end{minipage}")
+                        sections.append(r"\hfill")
+                        sections.append(r"\begin{minipage}[t]{0.48\textwidth}")
+                        sections.append(tables_list[1])
+                        sections.append(r"\end{minipage}")
+                    else:
+                        sections.append(tables_list[0])
+                    sections.append(r"\vspace{0.5cm}")
+
+                if season_cat:
+                    layout_three(season_cat)
+                if recent_cat:
+                    layout_three(recent_cat)
+        
+        sections.append(r"\vspace{0.5cm}")
         
         return '\n'.join(sections)
 
@@ -1675,7 +2336,7 @@ Conservative & {conservative.get('transfers', 1)} & 0 pts & \textcolor{{fplgreen
         
         # Fetch BGW/DGW data
         try:
-            bgw_dgw_data = get_bgw_dgw_gameweeks()
+            bgw_dgw_data = get_bgw_dgw_gameweeks(use_cache=True, session_cache=self.session_cache)
             bgws = bgw_dgw_data.get('bgw', [])
             dgws = bgw_dgw_data.get('dgw', [])
             
@@ -1861,6 +2522,61 @@ Based on your squad's actual performance data:
 \textit{{Projection based on {gws_played} gameweeks played at {avg_per_gw:.1f} PPG average.}}
 """
 
+    def _calculate_bonus_points(self, season_history: List[Dict], chips_used: List[Dict]) -> tuple:
+        """Calculate bonus points from captaincy choices and chip usage.
+        
+        Bonus points are the extra points gained from:
+        - Captaincy: (multiplier - 1) * captain_base_points per GW
+        - Triple Captain: Additional captain_base_points (3x instead of 2x)
+        - Bench Boost: Points from bench players during BB weeks
+        
+        Args:
+            season_history: List of gameweek entries with squad information.
+            chips_used: List of chips used with 'event' and 'name' fields.
+            
+        Returns:
+            Tuple of (bonus_points, percentage_share)
+        """
+        if not season_history:
+            return 0, 0.0
+        
+        # Build chip map for quick lookup
+        chip_map = {c.get('event', 0): c.get('name', '') for c in chips_used}
+        
+        total_bonus = 0
+        total_points = 0
+        
+        for gw_entry in season_history:
+            gw_num = gw_entry.get('gameweek', 0)
+            squad = gw_entry.get('squad', [])
+            chip_this_gw = chip_map.get(gw_num, '')
+            is_bench_boost = chip_this_gw in ('bboost', 'Bench Boost')
+            
+            for player in squad:
+                position_in_squad = player.get('position_in_squad', 0)
+                base_points = player.get('stats', {}).get('event_points', 0) or 0
+                multiplier = player.get('multiplier', 1)
+                
+                # Calculate actual points contributed
+                if position_in_squad <= 11:
+                    # Starting XI player
+                    actual_points = base_points * multiplier
+                    total_points += actual_points
+                    
+                    # Captain bonus: extra points from multiplier > 1
+                    if multiplier > 1:
+                        captain_bonus = base_points * (multiplier - 1)
+                        total_bonus += captain_bonus
+                elif is_bench_boost:
+                    # Bench players count during Bench Boost
+                    total_points += base_points
+                    total_bonus += base_points  # All bench points are "bonus"
+        
+        # Calculate percentage
+        pct_share = (total_bonus / total_points * 100) if total_points > 0 else 0.0
+        
+        return total_bonus, pct_share
+
     def generate_competitive_analysis(self, competitive_data: List[Dict]) -> str:
         """Generate competitive analysis section comparing multiple teams.
 
@@ -1880,8 +2596,6 @@ Based on your squad's actual performance data:
             team_name = self._escape_latex(team_info.get('team_name', 'Unknown'))
             manager = self._escape_latex(team_info.get('manager_name', 'Unknown'))
             points = team_info.get('overall_points', 0)
-            rank = team_info.get('overall_rank', 0)
-            rank_str = f"{rank:,}" if rank else "N/A"
             team_value = entry.get('team_value', 100.0)
             bank = entry.get('bank', 0.0)
             total_hits = entry.get('total_hits', 0)
@@ -1891,9 +2605,14 @@ Based on your squad's actual performance data:
             # Calculate free transfers using same methodology as season summary
             gw_history = entry.get('gw_history', [])
             free_transfers = self._calculate_free_transfers(gw_history, chips_used)
+            
+            # Calculate bonus points from captaincy and chips
+            season_history = entry.get('season_history', [])
+            bonus_pts, bonus_pct = self._calculate_bonus_points(season_history, chips_used)
+            bonus_str = f"{bonus_pts} ({bonus_pct:.1f}\\%)"
 
             summary_rows.append(
-                rf"{team_name} & {manager} & {points} & {rank_str} & {team_value:.1f} & {bank:.1f} & {total_hits} & {free_transfers} & {chips_str} \\"
+                rf"{team_name} & {manager} & {points} & {bonus_str} & {team_value:.1f} & {bank:.1f} & {total_hits} & {free_transfers} & {chips_str} \\"
             )
 
         summary_table = '\n'.join(summary_rows)
@@ -1996,7 +2715,7 @@ Compare performance metrics across your mini-league competitors.
 \resizebox{{\textwidth}}{{!}}{{%
 \begin{{tabular}}{{l|l|r|r|r|r|r|r|l}}
 \toprule
-\textbf{{Team}} & \textbf{{Manager}} & \textbf{{Pts}} & \textbf{{Rank}} & \textbf{{TV}} & \textbf{{ITB}} & \textbf{{Hits}} & \textbf{{FT}} & \textbf{{Chips}} \\
+\textbf{{Team}} & \textbf{{Manager}} & \textbf{{Pts}} & \textbf{{Bonus (\% Share)}} & \textbf{{TV}} & \textbf{{ITB}} & \textbf{{Hits}} & \textbf{{FT}} & \textbf{{Chips}} \\
 \midrule
 {summary_table}
 \bottomrule
@@ -2736,163 +3455,193 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
         if not free_hit_team:
             return ""
         
-        budget = free_hit_team.get('budget', {})
-        squad = free_hit_team.get('squad', [])
-        starting_xi = free_hit_team.get('starting_xi', [])
-        bench = free_hit_team.get('bench', [])
-        formation = free_hit_team.get('formation', '?-?-?')
-        captain = free_hit_team.get('captain', {})
-        vice_captain = free_hit_team.get('vice_captain', {})
+        # Get all permutations or create single-item list for backward compatibility
+        all_permutations = free_hit_team.get('all_permutations', [free_hit_team])
         target_gw = free_hit_team.get('target_gw', '?')
-        strategy = free_hit_team.get('strategy', 'balanced')
-        league_analysis = free_hit_team.get('league_analysis', {})
-        ev_analysis = free_hit_team.get('ev_analysis', {})
+        primary_strategy = free_hit_team.get('strategy', 'balanced')
         
         sections = []
         sections.append(r"\newpage")
-        sections.append(rf"\section{{Free Hit Draft (GW{target_gw})}}")
-        
-        # Expected Value Analysis box (if available) - 1 GW for Free Hit
-        if ev_analysis:
-            current_xp = ev_analysis.get('current_squad_xp', 0)
-            optimized_xp = ev_analysis.get('optimized_xp', 0)
-            gain = ev_analysis.get('potential_gain', 0)
-            horizon = ev_analysis.get('horizon', '1 GW')
-            
-            gain_color = 'fplgreen' if gain > 0 else 'fplpink'
-            gain_sign = '+' if gain > 0 else ''
-            
-            sections.append(rf"""
-\subsection{{Expected Value Analysis ({horizon})}}
-
-\begin{{center}}
-\begin{{tikzpicture}}
-    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplgreen!10] {{
-        \begin{{tabular}}{{ccc}}
-            \textcolor{{fplpurple}}{{\Large\textbf{{{current_xp:.1f}}}}} &
-            \textcolor{{fplpurple}}{{\Large\textbf{{{optimized_xp:.1f}}}}} &
-            \textcolor{{{gain_color}}}{{\Large\textbf{{{gain_sign}{gain:.1f}}}}}\\[3pt]
-            \textcolor{{fplgray}}{{Current Squad xP}} &
-            \textcolor{{fplgray}}{{Optimized xP}} &
-            \textcolor{{fplgray}}{{Potential Gain}}
-        \end{{tabular}}
-    }};
-\end{{tikzpicture}}
-\end{{center}}
-""")
-        
-        # Add GW comparison plot if available
-        gw_plot = free_hit_team.get('gw_plot')
-        gw_comparison = free_hit_team.get('gw_comparison', {})
-        if gw_plot and gw_comparison.get('gameweeks'):
-            best_gw = gw_comparison.get('best_gw')
-            best_text = f" Best GW to use Free Hit: \\textbf{{GW{best_gw}}}" if best_gw else ""
-            
-            sections.append(rf"""
-\subsection{{When to Play Your Free Hit}}
-\textit{{Comparison of expected points over the next 5 gameweeks.{best_text}}}
-
-\begin{{center}}
-\includegraphics[width=0.95\textwidth]{{{gw_plot}}}
-\end{{center}}
-""")
-        
-        # Budget summary
-        total = budget.get('total', 100.0)
-        spent = budget.get('spent', 0.0)
-        remaining = budget.get('remaining', 0.0)
+        sections.append(r"\section{Free Hit Draft}")
         
         sections.append(rf"""
-\subsection{{Budget Overview}}
-
-\begin{{center}}
-\begin{{tikzpicture}}
-    \node[draw=fplgreen,line width=2pt,rounded corners=8pt,inner sep=12pt,fill=fplgreen!5] {{
-        \begin{{tabular}}{{ccc}}
-            \textcolor{{fplgreen}}{{\Large\textbf{{\pounds{total:.1f}m}}}} &
-            \textcolor{{fplgreen}}{{\Large\textbf{{\pounds{spent:.1f}m}}}} &
-            \textcolor{{fplpurple}}{{\Large\textbf{{\pounds{remaining:.1f}m}}}}\\[3pt]
-            \textcolor{{fplgray}}{{Total Budget}} &
-            \textcolor{{fplgray}}{{Spent}} &
-            \textcolor{{fplgray}}{{In The Bank}}
-        \end{{tabular}}
-    }};
-\end{{tikzpicture}}
-\end{{center}}
+\textit{{Optimized for \textbf{{GW{target_gw}}} - Three strategic approaches to consider based on your league position and risk appetite.}}
 """)
         
-        # Formation and Captain info
-        cap_name = self._escape_latex(captain.get('name', 'Unknown'))
-        vc_name = self._escape_latex(vice_captain.get('name', 'Unknown'))
-        strategy_label = strategy.capitalize()
+        # =========================================================
+        # COMPARISON TABLE - All 3 Strategies Overview
+        # =========================================================
+        sections.append(r"\subsection{Strategy Comparison}")
         
-        sections.append(rf"""
-\subsection{{Suggested Setup}}
-
-\begin{{center}}
-\begin{{tabular}}{{ll}}
-\textbf{{Target Gameweek:}} & GW{target_gw} \\
-\textbf{{Formation:}} & {formation} \\
-\textbf{{Captain:}} & {cap_name} \\
-\textbf{{Vice Captain:}} & {vc_name} \\
-\textbf{{Strategy:}} & {strategy_label} \\
-\end{{tabular}}
-\end{{center}}
-""")
-        
-        # Starting XI table with league ownership and FDR
-        sections.append(r"\subsection{Starting XI}")
-        
-        sample_size = league_analysis.get('sample_size', 0)
-        if sample_size > 0:
-            sections.append(rf"\textit{{League ownership based on {sample_size} teams. FDR colors: \colorbox{{fplgreen!40}}{{Easy}} \colorbox{{gold!40}}{{Med}} \colorbox{{orange!40}}{{Hard}} \colorbox{{fplpink!40}}{{V.Hard}}}}")
-        else:
-            sections.append(r"\textit{FDR colors: \colorbox{fplgreen!40}{Easy (1-2)} \colorbox{gold!40}{Medium (3)} \colorbox{orange!40}{Hard (4)} \colorbox{fplpink!40}{Very Hard (5)}}")
+        strategy_colors = {
+            'safe': 'fplgreen',
+            'balanced': 'gold',
+            'aggressive': 'fplpink'
+        }
+        strategy_icons = {
+            'safe': r'\faShield',
+            'balanced': r'\faBalanceScale',
+            'aggressive': r'\faBolt'
+        }
         
         sections.append(r"""
 \begin{center}
-\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{l|c|c|r|r|r|r|ccccc}
+\small
+\begin{tabular}{l|c|c|c}
 \toprule
-\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{xPts} & \textbf{5-GW xP} & \textbf{Own\%} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures (FDR)}} \\
+\textbf{Metric} & \textbf{Safe (Template)} & \textbf{Balanced} & \textbf{Aggressive (Diff)} \\
 \midrule
 """)
         
-        # Group XI by position
-        xi_by_pos = {'GKP': [], 'DEF': [], 'MID': [], 'FWD': []}
-        for p in starting_xi:
-            pos = p.get('position', 'UNK')
-            if pos in xi_by_pos:
-                xi_by_pos[pos].append(p)
+        # Build comparison rows
+        for perm in all_permutations:
+            strat = perm.get('strategy', 'balanced')
+            budget = perm.get('budget', {})
+            ev = perm.get('ev_analysis', {})
+            captain = perm.get('captain', {})
+            formation = perm.get('formation', '?-?-?')
         
-        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
-            for p in xi_by_pos[pos]:
-                name = self._escape_latex(p.get('name', 'Unknown'))
-                team = self._escape_latex(str(p.get('team', 'UNK')))
-                price = p.get('price', 0.0)
-                ep_next = p.get('ep_next', 0.0)
-                xp_5gw = p.get('xp_5gw', 0.0)
-                league_own = p.get('league_ownership', 0.0)
-                fixtures = p.get('fixtures', [])
-                
-                # Mark captain/VC
-                suffix = ''
-                if p.get('name') == captain.get('name'):
-                    suffix = r' \textbf{(C)}'
-                elif p.get('name') == vice_captain.get('name'):
-                    suffix = r' \textbf{(VC)}'
-                
-                # Format FDR fixtures with color coding
-                fdr_cells = []
-                for i in range(5):
-                    if i < len(fixtures):
-                        fix = fixtures[i]
+        # Extract metrics for each strategy
+        metrics = {}
+        for perm in all_permutations:
+            strat = perm.get('strategy', 'balanced')
+            metrics[strat] = {
+                'spent': perm.get('budget', {}).get('spent', 0),
+                'itb': perm.get('budget', {}).get('remaining', 0),
+                'xp': perm.get('ev_analysis', {}).get('optimized_xp', 0),
+                'gain': perm.get('ev_analysis', {}).get('potential_gain', 0),
+                'captain': perm.get('captain', {}).get('name', 'Unknown'),
+                'formation': perm.get('formation', '?-?-?'),
+            }
+        
+        # Add rows
+        safe = metrics.get('safe', {})
+        balanced = metrics.get('balanced', {})
+        aggressive = metrics.get('aggressive', {})
+        
+        current_xp = all_permutations[0].get('ev_analysis', {}).get('current_squad_xp', 0) if all_permutations else 0
+        
+        sections.append(rf"Expected Points (xP) & {safe.get('xp', 0):.1f} & {balanced.get('xp', 0):.1f} & {aggressive.get('xp', 0):.1f} \\")
+        
+        # Gain row with color coding
+        def gain_color(g):
+            if g > 0:
+                return rf"\textcolor{{fplgreen}}{{+{g:.1f}}}"
+            elif g < 0:
+                return rf"\textcolor{{fplpink}}{{{g:.1f}}}"
+            else:
+                return f"{g:.1f}"
+        
+        sections.append(rf"vs Current Squad & {gain_color(safe.get('gain', 0))} & {gain_color(balanced.get('gain', 0))} & {gain_color(aggressive.get('gain', 0))} \\")
+        sections.append(rf"Budget Spent & \pounds{safe.get('spent', 0):.1f}m & \pounds{balanced.get('spent', 0):.1f}m & \pounds{aggressive.get('spent', 0):.1f}m \\")
+        sections.append(rf"In The Bank & \pounds{safe.get('itb', 0):.1f}m & \pounds{balanced.get('itb', 0):.1f}m & \pounds{aggressive.get('itb', 0):.1f}m \\")
+        sections.append(rf"Formation & {safe.get('formation', '?')} & {balanced.get('formation', '?')} & {aggressive.get('formation', '?')} \\")
+        sections.append(rf"Captain & {self._escape_latex(safe.get('captain', '?'))} & {self._escape_latex(balanced.get('captain', '?'))} & {self._escape_latex(aggressive.get('captain', '?'))} \\")
+        
+        sections.append(r"""
+\bottomrule
+\end{tabular}
+\end{center}
+""")
+        
+        sections.append(rf"""
+\textit{{Your current squad projected: \textbf{{{current_xp:.1f} xP}} for GW{target_gw}}}
+""")
+        
+        # =========================================================
+        # DETAILED SQUADS - One subsection per strategy
+        # =========================================================
+        strategy_descriptions = {
+            'safe': ('Template Squad', 'High ownership players to protect your rank. Minimize risk by matching the league template.'),
+            'balanced': ('Balanced Squad', 'Mix of template picks and differentials. Good risk-reward balance.'),
+            'aggressive': ('Differential Squad', 'Low ownership picks to gain ground. Higher risk but bigger potential reward.')
+        }
+        
+        for perm in all_permutations:
+            strat = perm.get('strategy', 'balanced')
+            strat_title, strat_desc = strategy_descriptions.get(strat, ('Squad', ''))
+            
+            starting_xi = perm.get('starting_xi', [])
+            bench = perm.get('bench', [])
+            captain = perm.get('captain', {})
+            vice_captain = perm.get('vice_captain', {})
+            budget = perm.get('budget', {})
+            league_analysis = perm.get('league_analysis', {})
+            sample_size = league_analysis.get('sample_size', 0)
+            
+            # Strategy header with colored box
+            strat_color = strategy_colors.get(strat, 'fplgray')
+            budget_spent = budget.get('spent', 0)
+            budget_itb = budget.get('remaining', 0)
+            formation_str = perm.get('formation', '?')
+            captain_name = self._escape_latex(captain.get('name', '?'))
+            
+            sections.append(rf"""
+\subsection{{{strat_title} ({strat.capitalize()})}}
+\textit{{{strat_desc}}}
+
+\begin{{center}}
+\begin{{tikzpicture}}
+    \node[draw={strat_color},line width=1.5pt,rounded corners=6pt,inner sep=8pt,fill={strat_color}!10] {{
+        \begin{{tabular}}{{cccc}}
+            \textcolor{{{strat_color}}}{{\textbf{{\pounds{budget_spent:.1f}m}}}} &
+            \textcolor{{{strat_color}}}{{\textbf{{\pounds{budget_itb:.1f}m}}}} &
+            \textcolor{{{strat_color}}}{{\textbf{{{formation_str}}}}} &
+            \textcolor{{{strat_color}}}{{\textbf{{{captain_name} (C)}}}}\\[2pt]
+            \textcolor{{fplgray}}{{\small Spent}} &
+            \textcolor{{fplgray}}{{\small ITB}} &
+            \textcolor{{fplgray}}{{\small Formation}} &
+            \textcolor{{fplgray}}{{\small Captain}}
+        \end{{tabular}}
+    }};
+\end{{tikzpicture}}
+\end{{center}}
+""")
+            
+            # Starting XI table
+            if sample_size > 0:
+                sections.append(rf"\textit{{\footnotesize League ownership based on {sample_size} teams. FDR: \colorbox{{fplgreen!40}}{{Easy}} \colorbox{{gold!40}}{{Med}} \colorbox{{orange!40}}{{Hard}} \colorbox{{fplpink!40}}{{V.Hard}}}}")
+            
+            sections.append(rf"""
+\begin{{center}}
+\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
+\begin{{tabular}}{{l|c|c|r|r|r|c}}
+\toprule
+\textbf{{Player}} & \textbf{{Pos}} & \textbf{{Team}} & \textbf{{Price}} & \textbf{{xP}} & \textbf{{Own\%}} & \textbf{{GW{target_gw}}} \\
+\midrule
+""")
+            
+            # Group XI by position
+            xi_by_pos = {'GKP': [], 'DEF': [], 'MID': [], 'FWD': []}
+            for p in starting_xi:
+                pos = p.get('position', 'UNK')
+                if pos in xi_by_pos:
+                    xi_by_pos[pos].append(p)
+            
+            for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+                for p in xi_by_pos[pos]:
+                    name = self._escape_latex(p.get('name', 'Unknown'))
+                    team = self._escape_latex(str(p.get('team', 'UNK')))
+                    price = p.get('price', 0.0)
+                    ep_next = p.get('ep_next', 0.0)
+                    if ep_next <= 0:
+                        ep_next = p.get('xp_5gw', 0.0) / 5.0
+                    league_own = p.get('league_ownership', 0.0)
+                    fixtures = p.get('fixtures', [])
+                    
+                    suffix = ''
+                    if p.get('name') == captain.get('name'):
+                        suffix = r' \textbf{(C)}'
+                    elif p.get('name') == vice_captain.get('name'):
+                        suffix = r' \textbf{(VC)}'
+                    
+                    if fixtures:
+                        fix = fixtures[0]
                         opp = fix.get('opponent', '?')
                         fdr = fix.get('fdr', 3)
                         is_home = fix.get('is_home', False)
                         
-                        # Color based on FDR
                         if fdr <= 2:
                             fdr_color = 'fplgreen!40'
                         elif fdr == 3:
@@ -2902,140 +3651,44 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
                         else:
                             fdr_color = 'fplpink!40'
                         
-                        # Format: OPP (H/a)
                         venue = '' if is_home else '(a)'
-                        fdr_cells.append(rf"\cellcolor{{{fdr_color}}}{opp}{venue}")
+                        fdr_cell = rf"\cellcolor{{{fdr_color}}}{opp}{venue}"
                     else:
-                        fdr_cells.append('-')
-                
-                fdr_str = ' & '.join(fdr_cells)
-                sections.append(rf"{name}{suffix} & {pos} & {team} & \pounds{price:.1f}m & {ep_next:.1f} & {xp_5gw:.1f} & {league_own:.0f}\% & {fdr_str} \\")
-        
-        # XI totals
-        xi_cost = sum(p.get('price', 0) for p in starting_xi)
-        xi_xpts = sum(p.get('ep_next', 0) for p in starting_xi)
-        xi_xp_5gw = sum(p.get('xp_5gw', 0) for p in starting_xi)
-        
-        sections.append(rf"""
+                        fdr_cell = '-'
+                    
+                    sections.append(rf"{name}{suffix} & {pos} & {team} & \pounds{price:.1f}m & {ep_next:.1f} & {league_own:.0f}\% & {fdr_cell} \\")
+            
+            xi_cost = sum(p.get('price', 0) for p in starting_xi)
+            xi_xp = sum(p.get('ep_next', 0) or (p.get('xp_5gw', 0) / 5.0) for p in starting_xi)
+            
+            sections.append(rf"""
 \midrule
-\textbf{{Total XI}} & & & \textbf{{\pounds{xi_cost:.1f}m}} & \textbf{{{xi_xpts:.1f}}} & \textbf{{{xi_xp_5gw:.1f}}} & & & & & & \\
+\textbf{{Total XI}} & & & \textbf{{\pounds{xi_cost:.1f}m}} & \textbf{{{xi_xp:.1f}}} & & \\
 \bottomrule
 \end{{tabular}}
 \end{{center}}
 """)
+            
+            # Bench (compact)
+            if bench:
+                bench_names = ', '.join([self._escape_latex(p.get('name', '?')) for p in bench])
+                bench_cost = sum(p.get('price', 0) for p in bench)
+                sections.append(rf"\textit{{\footnotesize \textbf{{Bench}} (\pounds{bench_cost:.1f}m): {bench_names}}}")
+                sections.append("")
         
-        # Bench table with FDR
-        sections.append(r"\subsection{Bench}")
+        # =========================================================
+        # STRATEGY NOTES
+        # =========================================================
         sections.append(r"""
-\begin{center}
-\scriptsize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{l|c|c|r|r|r|ccccc}
-\toprule
-\textbf{Player} & \textbf{Pos} & \textbf{Team} & \textbf{Price} & \textbf{xPts} & \textbf{5-GW xP} & \multicolumn{5}{c}{\textbf{Next 5 Fixtures}} \\
-\midrule
-""")
-        
-        for p in bench:
-            name = self._escape_latex(p.get('name', 'Unknown'))
-            pos = p.get('position', 'UNK')
-            team = self._escape_latex(str(p.get('team', 'UNK')))
-            price = p.get('price', 0.0)
-            ep_next = p.get('ep_next', 0.0)
-            xp_5gw = p.get('xp_5gw', 0.0)
-            fixtures = p.get('fixtures', [])
-            
-            # Format FDR fixtures
-            fdr_cells = []
-            for i in range(5):
-                if i < len(fixtures):
-                    fix = fixtures[i]
-                    opp = fix.get('opponent', '?')
-                    fdr = fix.get('fdr', 3)
-                    is_home = fix.get('is_home', False)
-                    
-                    if fdr <= 2:
-                        fdr_color = 'fplgreen!40'
-                    elif fdr == 3:
-                        fdr_color = 'gold!40'
-                    elif fdr == 4:
-                        fdr_color = 'orange!40'
-                    else:
-                        fdr_color = 'fplpink!40'
-                    
-                    venue = '' if is_home else '(a)'
-                    fdr_cells.append(rf"\cellcolor{{{fdr_color}}}{opp}{venue}")
-                else:
-                    fdr_cells.append('-')
-            
-            fdr_str = ' & '.join(fdr_cells)
-            sections.append(rf"{name} & {pos} & {team} & \pounds{price:.1f}m & {ep_next:.1f} & {xp_5gw:.1f} & {fdr_str} \\")
-        
-        bench_cost = sum(p.get('price', 0) for p in bench)
-        bench_xp_5gw = sum(p.get('xp_5gw', 0) for p in bench)
-        
-        sections.append(rf"""
-\midrule
-\textbf{{Bench Total}} & & & \textbf{{\pounds{bench_cost:.1f}m}} & & \textbf{{{bench_xp_5gw:.1f}}} & & & & & \\
-\bottomrule
-\end{{tabular}}
-\end{{center}}
-""")
-        
-        # League analysis - differentials and template picks
-        differentials = league_analysis.get('differentials', [])
-        template_picks = league_analysis.get('template_picks', [])
-        
-        if sample_size > 0 and (differentials or template_picks):
-            sections.append(r"\subsection{Beat The League Analysis}")
-            
-            if template_picks:
-                sections.append(r"\subsubsection*{Template Picks (High League Ownership)}")
-                sections.append(r"These players are highly owned in your league - keeping them protects against losing ground:")
-                sections.append(r"\begin{itemize}")
-                for t in template_picks[:5]:
-                    name = self._escape_latex(t.get('name', 'Unknown'))
-                    pos = t.get('position', 'UNK')
-                    own = t.get('ownership', 0)
-                    sections.append(rf"\item {name} ({pos}) - {own:.0f}\% league ownership")
-                sections.append(r"\end{itemize}")
-            
-            if differentials:
-                sections.append(r"\subsubsection*{Differentials (Low League Ownership)}")
-                sections.append(r"These players give you upside vs your league rivals:")
-                sections.append(r"\begin{itemize}")
-                for d in differentials[:5]:
-                    name = self._escape_latex(d.get('name', 'Unknown'))
-                    pos = d.get('position', 'UNK')
-                    own = d.get('ownership', 0)
-                    sections.append(rf"\item {name} ({pos}) - only {own:.0f}\% league ownership")
-                sections.append(r"\end{itemize}")
-        
-        # Strategy note
-        strategy_notes = {
-            'safe': r"Maximize overlap with league template, minimal differentials to protect rank.",
-            'balanced': r"Strong template core with 2-4 differentials for upside potential.",
-            'aggressive': r"Chase maximum upside with more differentials, including differential captain."
-        }
-        note = strategy_notes.get(strategy, strategy_notes['balanced'])
-        
-        sections.append(rf"""
-\subsection{{Strategy Notes}}
+\subsection{Strategy Guide}
 
-This Free Hit draft uses \textbf{{{strategy_label}}} strategy:
-\begin{{quote}}
-{note}
-\end{{quote}}
+\begin{itemize}
+    \item \textbf{Safe/Template}: Best if you're protecting a lead in your mini-league. Minimizes variance.
+    \item \textbf{Balanced}: Good all-round choice. Template core with upside from differentials.
+    \item \textbf{Aggressive/Differential}: Best if you're chasing. Higher risk but can gain significant ground.
+\end{itemize}
 
-Key considerations:
-\begin{{itemize}}
-    \item Players selected based on \textbf{{ep\_next}} (expected points next GW)
-    \item League ownership used to identify differentials and template picks
-    \item Formation optimized for maximum expected points
-    \item All players are currently available (no injuries/suspensions)
-\end{{itemize}}
-
-\textit{{Note: Verify player availability and news before activating your Free Hit chip.}}
+\textit{Note: Verify player availability and news before activating your Free Hit chip.}
 """)
         
         return '\n'.join(sections)
@@ -3112,7 +3765,14 @@ Key considerations:
             manager = self._escape_latex(team_info.get('manager_name', 'Unknown'))
             points = team_info.get('overall_points', 0)
             rank = team_info.get('overall_rank', 0)
-            summary_rows.append(f"    {team_name} & {manager} & {points:,} & {rank:,} \\\\")
+            
+            # Calculate bonus points from captaincy and chips
+            season_history = entry.get('season_history', [])
+            chips_used = entry.get('chips_used', [])
+            bonus_pts, bonus_pct = self._calculate_bonus_points(season_history, chips_used)
+            bonus_str = f"{bonus_pts} ({bonus_pct:.1f}\\%)"
+            
+            summary_rows.append(f"    {team_name} & {manager} & {points:,} & {rank:,} & {bonus_str} \\\\")
         
         summary_table = "\n".join(summary_rows)
         
@@ -3150,9 +3810,9 @@ Key considerations:
 
 \subsection{{Summary Comparison}}
 
-\begin{{tabularx}}{{\textwidth}}{{Xllr}}
+\begin{{tabularx}}{{\textwidth}}{{Xllrr}}
 \toprule
-\textbf{{Team}} & \textbf{{Manager}} & \textbf{{Points}} & \textbf{{Rank}} \\
+\textbf{{Team}} & \textbf{{Manager}} & \textbf{{Points}} & \textbf{{Rank}} & \textbf{{Bonus (\% Share)}} \\
 \midrule
 {summary_table}
 \bottomrule
@@ -3233,7 +3893,7 @@ Key considerations:
             Complete LaTeX document as string.
         """
         team_name = team_info.get('team_name', 'Unknown')
-        season = team_info.get('season', '2025-26')
+        season = team_info.get('season', DEFAULT_SEASON)
 
         # Choose transfer strategy section based on available data
         if multi_week_strategy:

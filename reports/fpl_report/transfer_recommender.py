@@ -5,10 +5,14 @@ based on form, fixtures, value, and expected metrics. Includes fixture
 swing detection and model performance metrics for transfer planning.
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from .predictor import FPLPointsPredictor
+from .fpl_core_predictor import FPLCorePredictor
+
+logger = logging.getLogger(__name__)
 
 # Try to import new inference pipeline (position-specific models)
 try:
@@ -44,17 +48,63 @@ class TransferRecommender:
         'falling_knife': -0.05,  # <-5% net outflow = falling knife
     }
 
-    def __init__(self, data_fetcher, player_analyzer, use_new_models: bool = True):
+    def __init__(self, data_fetcher, player_analyzer, use_new_models: bool = True,
+                 use_fpl_core_predictor: bool = True,
+                 all_gw_data: Dict = None,
+                 fpl_core_season_data: Dict = None,
+                 current_gw: int = None,
+                 # Cross-season training parameters (optional)
+                 prev_all_gw_data: Dict = None,
+                 prev_fpl_core_season_data: Dict = None,
+                 prev_season_start_year: int = None,
+                 current_season_start_year: int = None):
         """Initialize with data fetcher and analyzer.
 
         Args:
             data_fetcher: FPLDataFetcher instance.
             player_analyzer: PlayerAnalyzer instance.
             use_new_models: If True, use position-specific ML models when available.
+            use_fpl_core_predictor: If True, use the enhanced FPL Core predictor with Opta-like features.
+            all_gw_data: Dict of gameweek data from FPL Core Insights (required for FPL Core predictor).
+            fpl_core_season_data: Season-level data from FPL Core Insights (required for FPL Core predictor).
+            current_gw: Current gameweek number.
+            prev_all_gw_data: Previous season gameweek data for cross-season training.
+            prev_fpl_core_season_data: Previous season-level data for cross-season training.
+            prev_season_start_year: Start year of previous season (e.g., 2024 for 2024-25).
+            current_season_start_year: Start year of current season (e.g., 2025 for 2025-26).
         """
         self.fetcher = data_fetcher
         self.analyzer = player_analyzer
-        self.predictor = FPLPointsPredictor(data_fetcher)
+        self.all_gw_data = all_gw_data
+        self.fpl_core_season_data = fpl_core_season_data
+        self.current_gw = current_gw
+        self.use_fpl_core_predictor = use_fpl_core_predictor
+        
+        # Cross-season training data
+        self.prev_all_gw_data = prev_all_gw_data
+        self.prev_fpl_core_season_data = prev_fpl_core_season_data
+        self.prev_season_start_year = prev_season_start_year
+        self.current_season_start_year = current_season_start_year
+        
+        # Check if cross-season training is available
+        self._cross_season_available = (
+            prev_all_gw_data is not None and
+            prev_fpl_core_season_data is not None and
+            prev_season_start_year is not None and
+            current_season_start_year is not None
+        )
+        
+        # Initialize predictor based on preference
+        if use_fpl_core_predictor and all_gw_data and fpl_core_season_data:
+            if self._cross_season_available:
+                print("Using FPL Core Insights predictor with cross-season training")
+            else:
+                print("Using FPL Core Insights predictor with 40+ Opta-like features")
+            self.predictor = FPLCorePredictor()
+            self._fpl_core_predictor_ready = True
+        else:
+            self.predictor = FPLPointsPredictor(data_fetcher)
+            self._fpl_core_predictor_ready = False
         
         # New inference pipeline (position-specific models)
         self.inference_pipeline = None
@@ -301,27 +351,29 @@ class TransferRecommender:
         budget = self.fetcher.get_bank()
         recommendations = []
         
-        # Prepare training for top players to ensure model is ready
-        # Collect IDs of potential candidates
+        # Ensure model is trained (loads pre-trained if available)
+        print("Ensuring prediction model is ready...")
+        self._ensure_model_trained()
+        
+        # Collect candidate player IDs for prediction
         all_candidate_ids = []
         for player in underperformers[:5]:
             position = player['position']
             candidates = self.fetcher.get_all_players_by_position(position)
-            # Filter reasonably good options to train on
-            candidates = candidates[candidates['minutes'] >= 450] # At least 5 games
+            candidates = candidates[candidates['minutes'] >= 450]
             all_candidate_ids.extend(candidates['id'].tolist())
             
-        # Train model once on these players (unique)
         unique_ids = list(set(all_candidate_ids))
-        # Limit to top 200 to save time
         if len(unique_ids) > 200:
             unique_ids = unique_ids[:200]
-            
-        print(f"Training prediction model on {len(unique_ids)} players...")
-        self.predictor.train(unique_ids)
         
-        # Predict for all trained players
-        predictions = self.predictor.predict(unique_ids)
+        # Get predictions
+        if self._fpl_core_predictor_ready and isinstance(self.predictor, FPLCorePredictor):
+            predictions = self.predictor.predict(
+                self.all_gw_data, self.fpl_core_season_data, unique_ids, self.current_gw
+            )
+        else:
+            predictions = self.predictor.predict(unique_ids)
 
         for player in underperformers[:5]:  # Top 5 underperformers
             position = player['position']
@@ -666,8 +718,66 @@ class TransferRecommender:
             Dict with MAE, RMSE, R², sample counts, and confidence level.
         """
         metrics = self.predictor.get_model_metrics()
-        metrics['confidence'] = self.predictor.get_confidence_level()
+        # FPL Core predictor may not have get_confidence_level
+        if hasattr(self.predictor, 'get_confidence_level'):
+            metrics['confidence'] = self.predictor.get_confidence_level()
+        else:
+            # Calculate confidence based on R²
+            r2 = metrics.get('r2', 0) or 0
+            mae = metrics.get('mae', 999) or 999
+            if r2 > 0.3 and mae < 2.0:
+                metrics['confidence'] = 'high'
+            elif r2 > 0.15 or mae < 2.5:
+                metrics['confidence'] = 'medium'
+            else:
+                metrics['confidence'] = 'low'
         return metrics
+
+    def _ensure_model_trained(self):
+        """Ensure the prediction model is trained.
+        
+        First tries to load pre-trained models from disk (faster).
+        Falls back to training from scratch if no saved models found.
+        """
+        if self.predictor.is_trained:
+            return
+        
+        if self._fpl_core_predictor_ready and isinstance(self.predictor, FPLCorePredictor):
+            # Try loading pre-trained models from disk first
+            if self.predictor.load_from_disk():
+                logger.info("Using pre-trained FPL Core Predictor models")
+                return
+            
+            # Fall back to training if no saved models
+            logger.info("No pre-trained models found, training from scratch...")
+            
+            # Use cross-season training if previous season data is available
+            if self._cross_season_available:
+                self.predictor.train_cross_season(
+                    prev_all_gw_data=self.prev_all_gw_data,
+                    prev_fpl_core_season_data=self.prev_fpl_core_season_data,
+                    prev_season_start_year=self.prev_season_start_year,
+                    current_all_gw_data=self.all_gw_data,
+                    current_fpl_core_season_data=self.fpl_core_season_data,
+                    current_season_start_year=self.current_season_start_year,
+                    current_gw=self.current_gw,
+                )
+            else:
+                self.predictor.train(self.all_gw_data, self.fpl_core_season_data, self.current_gw)
+        else:
+            all_players = self.fetcher.players_df
+            train_ids = all_players[all_players['minutes'] >= 450]['id'].tolist()[:200]
+            self.predictor.train(train_ids)
+
+    def _predict_multiple_gws(self, player_ids: List[int], num_gws: int = 5) -> Dict:
+        """Wrapper for predict_multiple_gws that handles both predictor types."""
+        if self._fpl_core_predictor_ready and isinstance(self.predictor, FPLCorePredictor):
+            return self.predictor.predict_multiple_gws(
+                self.all_gw_data, self.fpl_core_season_data,
+                player_ids, self.current_gw, num_gws
+            )
+        else:
+            return self.predictor.predict_multiple_gws(player_ids, num_gws)
 
     def calculate_expected_value(self, player_id: int, 
                                   num_gws: int = 5) -> Dict:
@@ -680,13 +790,9 @@ class TransferRecommender:
         Returns:
             Dict with predictions and cumulative expected value.
         """
-        # Ensure model is trained
-        if not self.predictor.is_trained:
-            all_players = self.fetcher.players_df
-            train_ids = all_players[all_players['minutes'] >= 450]['id'].tolist()[:200]
-            self.predictor.train(train_ids)
+        self._ensure_model_trained()
         
-        result = self.predictor.predict_multiple_gws([player_id], num_gws)
+        result = self._predict_multiple_gws([player_id], num_gws)
         return result.get(player_id, {
             'predictions': [0] * num_gws,
             'cumulative': 0,
@@ -713,13 +819,9 @@ class TransferRecommender:
                 'per_gw_breakdown': comparison per GW
             }
         """
-        # Ensure model is trained
-        if not self.predictor.is_trained:
-            all_players = self.fetcher.players_df
-            train_ids = all_players[all_players['minutes'] >= 450]['id'].tolist()[:200]
-            self.predictor.train(train_ids)
+        self._ensure_model_trained()
         
-        predictions = self.predictor.predict_multiple_gws(
+        predictions = self._predict_multiple_gws(
             [player_out_id, player_in_id], num_gws
         )
         

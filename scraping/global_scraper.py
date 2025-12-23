@@ -3,12 +3,13 @@ from processing.cleaners import *
 from scraping.fpl_api import *
 from processing.collector import collect_gw, merge_gw
 from scraping.understat import parse_epl_data
+from utils.config import SEASON
 import csv
 
 def parse_data():
     """ Parse and store all the data
     """
-    season = '2025-26'
+    season = SEASON
     base_filename = 'data/' + season + '/'
     print("Getting data")
     data = get_data()
@@ -49,10 +50,21 @@ def parse_data():
             w.writeheader()
             for xp in xPoints:
                 w.writerow(xp)
-        print("Collecting gw scores")
-        collect_gw(gw_num, player_base_filename, gw_base_filename, base_filename) 
-        print("Merging gw scores")
-        merge_gw(gw_num, gw_base_filename)
+        
+        # Clear merged_gw.csv before collecting all GWs (to avoid duplicates)
+        merged_gw_path = os.path.join(gw_base_filename, 'merged_gw.csv')
+        if os.path.exists(merged_gw_path):
+            os.remove(merged_gw_path)
+        
+        print(f"Collecting gw scores for GW1-{gw_num}")
+        # Collect ALL gameweeks from 1 to current, not just the current one
+        for gw in range(1, gw_num + 1):
+            collect_gw(gw, player_base_filename, gw_base_filename, base_filename)
+        
+        print(f"Merging gw scores for GW1-{gw_num}")
+        # Merge ALL gameweeks into merged_gw.csv
+        for gw in range(1, gw_num + 1):
+            merge_gw(gw, gw_base_filename)
     #understat_filename = base_filename + 'understat'
     #parse_epl_data(understat_filename)
 

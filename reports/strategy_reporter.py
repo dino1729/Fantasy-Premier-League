@@ -397,7 +397,7 @@ if __name__ == '__main__':
     from solver.interpreter import StrategyPlan, WeeklyPlan
     
     # Create sample plan
-    plan = StrategyPlan(current_gw=16, horizon=5)
+    plan = StrategyPlan(current_gw=17, horizon=5)
     
     plan.weekly_plans[17] = WeeklyPlan(
         gameweek=17,

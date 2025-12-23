@@ -323,15 +323,45 @@ class FPLPointsPredictor:
                 row['opp_defense_strength'] = opp_str['defense']
                 
                 row['target_points'] = target_points
+                row['gameweek'] = gw  # Track GW for chronological split
                 
                 data.append(row)
                 
         return pd.DataFrame(data)
+    
+    def _chronological_split(self, df: pd.DataFrame, 
+                            validation_split: float = 0.2) -> tuple:
+        """Split dataset by gameweek with no overlap.
+        
+        The last N gameweeks (based on validation_split) go entirely to validation.
+        Guarantees no GW appears in both train and val sets.
+        """
+        if 'gameweek' not in df.columns:
+            # Fall back to row-based split
+            split_idx = int(len(df) * (1 - validation_split))
+            return df.iloc[:split_idx], df.iloc[split_idx:]
+        
+        unique_gws = sorted(df['gameweek'].unique())
+        n_gws = len(unique_gws)
+        
+        if n_gws < 2:
+            return df, pd.DataFrame(columns=df.columns)
+        
+        # Put at least 1 GW in validation, up to validation_split fraction
+        n_val_gws = max(1, int(n_gws * validation_split))
+        
+        train_gws = set(unique_gws[:-n_val_gws])
+        val_gws = set(unique_gws[-n_val_gws:])
+        
+        train_df = df[df['gameweek'].isin(train_gws)].copy()
+        val_df = df[df['gameweek'].isin(val_gws)].copy()
+        
+        return train_df, val_df
 
     def train(self, player_ids: List[int], validation_split: float = 0.2):
         """Train the Gradient Boosting model with validation metrics.
         
-        Uses time-based split to avoid data leakage.
+        Uses chronological gameweek-based split to avoid data leakage.
         """
         current_gw = self.fetcher.get_current_gameweek()
         if current_gw < 5:
@@ -349,12 +379,16 @@ class FPLPointsPredictor:
             if col not in df.columns:
                 df[col] = 0.0
 
-        # Split into training and validation sets (time-based split)
-        split_idx = int(len(df) * (1 - validation_split))
-        train_df = df.iloc[:split_idx]
-        val_df = df.iloc[split_idx:]
+        # Chronological split by gameweek (no overlap)
+        train_df, val_df = self._chronological_split(df, validation_split)
         
-        print(f"Training Ensemble (GB + RF) on {len(train_df)} samples, validating on {len(val_df)}...")
+        if 'gameweek' in train_df.columns and len(train_df) > 0:
+            train_gws = sorted(train_df['gameweek'].unique())
+            val_gws = sorted(val_df['gameweek'].unique()) if len(val_df) > 0 else []
+            print(f"Training Ensemble (GB + RF) on {len(train_df)} samples (GW{train_gws[0]}-{train_gws[-1]}), "
+                  f"validating on {len(val_df)} samples (GW{val_gws[0] if val_gws else 'none'}-{val_gws[-1] if val_gws else 'none'})...")
+        else:
+            print(f"Training Ensemble (GB + RF) on {len(train_df)} samples, validating on {len(val_df)}...")
         
         X_train = train_df[self.feature_cols].fillna(0)
         y_train = train_df['target_points']

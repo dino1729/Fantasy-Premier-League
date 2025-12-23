@@ -581,7 +581,7 @@ if __name__ == '__main__':
     }
     
     interpreter = SolverInterpreter()
-    plan = interpreter.interpret_mip_result(sample_result, current_gw=16, horizon=5)
+    plan = interpreter.interpret_mip_result(sample_result, current_gw=17, horizon=5)
     
     print(json.dumps(plan.to_dict(), indent=2))
 

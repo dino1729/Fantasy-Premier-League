@@ -2,6 +2,14 @@ import os
 import sys
 import csv
 
+from utils.config import SEASON
+
+
+def _get_default_root_directory():
+    """Get the default root directory based on configured SEASON."""
+    return f"data/{SEASON}"
+
+
 def get_teams(directory):
     teams = {}
     fin = open(directory + "/teams.csv", 'r')
@@ -65,7 +73,9 @@ def merge_gw(gw, gw_directory):
     for row in rows:
         writer.writerow(row)
 
-def collect_gw(gw, directory_name, output_dir, root_directory_name="data/2025-26"):
+def collect_gw(gw, directory_name, output_dir, root_directory_name=None):
+    if root_directory_name is None:
+        root_directory_name = _get_default_root_directory()
     rows = []
     fieldnames = []
     fixtures_home, fixtures_away = get_fixtures(root_directory_name)

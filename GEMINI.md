@@ -13,10 +13,10 @@ This project is a comprehensive toolkit for Fantasy Premier League (FPL) manager
 
 The system is organized into four main modules managed by `main.py`:
 
-1.  **ETL Pipeline (`etl/`, root scrapers)**
+1.  **ETL Pipeline (`etl/`, `scraping/`, `processing/`)**
     *   Fetches data from FPL API and external sources (Understat, ClubElo).
     *   Transforms raw data into clean CSVs and Parquet files in `data/`.
-    *   Key scripts: `global_scraper.py` (season data), `etl/pipeline.py`.
+    *   Key modules: `scraping.global_scraper` (season data), `etl/pipeline.py`.
 
 2.  **Machine Learning (`models/`)**
     *   **Training (`models/train.py`):** Trains custom models for GKP, DEF, MID, FWD.
@@ -28,23 +28,23 @@ The system is organized into four main modules managed by `main.py`:
     *   **Logic (`solver/optimizer.py`):** Maximizes projected points over a horizon (default 5 weeks) subject to budget, squad quotas, and transfer limits.
 
 4.  **Reporting (`reports/`)**
-    *   **Generator (`reports/generate_fpl_report.py`):** detailed analysis logic.
+    *   **Generator (`generate_fpl_report.py`):** Detailed analysis logic (at project root).
     *   **Output:** LaTeX-based PDFs containing squad breakdown, transfer advice, and plots.
-    *   **Wrapper:** `reports/run_report.sh` handles the full generation flow including PDF compilation.
+    *   **Wrapper:** `./run_report.sh` handles the full generation flow including PDF compilation.
 
 ## Key Files & Directories
 
 *   `main.py`: **Primary Entry Point**. Orchestrates the full pipeline (Data -> Model -> Solver -> Report).
-*   `global_scraper.py`: Updates the current season's dataset in `data/`.
-*   `reports/run_report.sh`: Helper script to generate PDF reports (requires `pdflatex`).
+*   `generate_fpl_report.py`: Report generation CLI (at project root).
+*   `run_report.sh`: Shell wrapper to generate PDF reports (requires `pdflatex`).
+*   `scraping/global_scraper.py`: Updates the current season's dataset.
+*   `processing/global_merger.py`: Merges multi-season data.
 *   `models/train.py`: Script to retrain the point prediction models.
 *   `solver/optimizer.py`: The core MIP solver implementation.
-*   `data/`: Data warehouse. Contains season folders (e.g., `2024-25/`) and `parquet/` files for the ML pipeline.
+*   `data/`: Data warehouse (not tracked in git). Contains season folders and parquet files.
 *   `requirements.txt`: Python dependencies.
 
 ## Usage Guide
-
-**Note:** As GW17 is currently ongoing, please only generate reports up to **GW16** during this testing phase.
 
 ### 1. Setup
 Activate the virtual environment and install dependencies:
@@ -56,25 +56,28 @@ pip install -r requirements.txt
 ### 2. Full Pipeline (Recommended)
 Run the complete flow: update data, predict points, solve for strategy, and report.
 ```bash
-# Example for GW16
-python main.py --update-data --team <YOUR_TEAM_ID> --gameweek 16
+python main.py --update-data --team <YOUR_TEAM_ID> --gameweek <N>
 ```
 
 ### 3. Quick Run (Cached Data)
 If data is already fresh, skip the update to save time:
 ```bash
-# Example for GW16
-python main.py --team <YOUR_TEAM_ID> --gameweek 16
+python main.py --team <YOUR_TEAM_ID> --gameweek <N>
 ```
 
 ### 4. Report Generation Only
 To generate a visual PDF report without running the full solver:
 ```bash
-# Example for GW16
-./reports/run_report.sh <YOUR_TEAM_ID> 16
+./run_report.sh <YOUR_TEAM_ID> [GAMEWEEK]
 ```
 
-### 5. Training Models
+### 5. Data Refresh
+To update the current season's dataset:
+```bash
+python -m scraping.global_scraper
+```
+
+### 6. Training Models
 To retrain the ML models with the latest data:
 ```bash
 python main.py --train-models
@@ -84,8 +87,17 @@ python main.py --train-models
 
 *   **Code Style:** PEP 8.
 *   **Data Management:**
-    *   Raw data goes to `data/<season>/`.
+    *   Raw data goes to `data/<season>/` (not tracked in git).
     *   Processed ML data goes to `data/parquet/`.
-    *   **Crucial:** Do not change CSV column names without updating `etl/` and `reports/` parsers.
+    *   **Crucial:** Do not change CSV column names without updating `processing/` and `reports/` parsers.
 *   **Testing:** Run unit tests via `python -m unittest discover -s tests -v`.
 *   **Solver:** If `sasoptpy`/`highspy` are missing, the system falls back to heuristic strategies.
+
+## Import Patterns
+
+```python
+from scraping.fpl_api import get_data
+from processing.parsers import parse_players
+from utils.utility import uprint
+from reports.fpl_report.data_fetcher import FPLDataFetcher
+```

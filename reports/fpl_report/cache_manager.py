@@ -1,11 +1,12 @@
 """Cache Manager Module
 
 Provides intelligent caching for FPL API responses to speed up development.
-Caches data with configurable TTL (time-to-live) and automatic invalidation.
+
+This implementation stores all cache entries in a single bundled pickle file
+to avoid creating dozens of per-key pickle files on disk.
 """
 
 import pickle
-import json
 import hashlib
 from pathlib import Path
 from typing import Any, Optional, Dict, Callable
@@ -44,32 +45,69 @@ class CacheManager:
         self.cache_dir = Path(cache_dir)
         if self.enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            
-        # Cache metadata file
-        self.metadata_file = self.cache_dir / "cache_metadata.json"
-        self.metadata = self._load_metadata()
+
+        # Single bundled cache file (avoid per-key .pkl fan-out)
+        self.cache_file = self.cache_dir / "cache_bundle.pkl"
+
+        if self.enabled:
+            self._cleanup_legacy_artifacts()
+
+        # In-memory structures loaded from bundle
+        bundle = self._load_bundle()
+        self._data: Dict[str, Any] = bundle.get("data", {})
+        self.metadata: Dict[str, Dict[str, Any]] = bundle.get("metadata", {})
+
+    def _cleanup_legacy_artifacts(self):
+        """Remove legacy per-key pickle files and metadata json.
+
+        Keep known session cache files if present.
+        """
+        # Remove legacy json metadata used by older CacheManager implementation
+        meta_path = self.cache_dir / "cache_metadata.json"
+        if meta_path.exists():
+            try:
+                meta_path.unlink()
+            except Exception:
+                pass
+
+        # Remove per-key md5-named cache pickles from the old implementation.
+        # Preserve:
+        # - bundled cache file used by this CacheManager
+        # - session cache pickles used by SessionCacheManager
+        keep_names = {"cache_bundle.pkl", "session_cache.pkl"}
+        for pkl_file in self.cache_dir.glob("*.pkl"):
+            if pkl_file.name in keep_names or pkl_file.name.startswith("session_"):
+                continue
+            try:
+                pkl_file.unlink()
+            except Exception:
+                pass
     
-    def _load_metadata(self) -> Dict:
-        """Load cache metadata from disk."""
-        if not self.enabled or not self.metadata_file.exists():
+    def _load_bundle(self) -> Dict[str, Any]:
+        """Load cache bundle from disk."""
+        if not self.enabled or not self.cache_file.exists():
             return {}
-        
+
         try:
-            with open(self.metadata_file, 'r') as f:
-                return json.load(f)
+            with open(self.cache_file, "rb") as f:
+                loaded = pickle.load(f)
+            return loaded if isinstance(loaded, dict) else {}
         except Exception:
             return {}
-    
-    def _save_metadata(self):
-        """Save cache metadata to disk."""
+
+    def _save_bundle(self):
+        """Persist cache bundle to disk (single file)."""
         if not self.enabled:
             return
-        
+
         try:
-            with open(self.metadata_file, 'w') as f:
-                json.dump(self.metadata, f, indent=2)
+            bundle = {"data": self._data, "metadata": self.metadata}
+            tmp_path = self.cache_file.with_suffix(".tmp")
+            with open(tmp_path, "wb") as f:
+                pickle.dump(bundle, f)
+            tmp_path.replace(self.cache_file)
         except Exception as e:
-            print(f"[WARN] Failed to save cache metadata: {e}")
+            print(f"[WARN] Failed to save cache bundle: {e}")
     
     def _generate_key(self, cache_type: str, *args, **kwargs) -> str:
         """Generate a unique cache key from function arguments.
@@ -91,10 +129,6 @@ class CacheManager:
         
         key_string = "|".join(key_parts)
         return hashlib.md5(key_string.encode()).hexdigest()
-    
-    def _get_cache_path(self, key: str) -> Path:
-        """Get the file path for a cache key."""
-        return self.cache_dir / f"{key}.pkl"
     
     def _is_expired(self, key: str, ttl: int) -> bool:
         """Check if a cache entry is expired.
@@ -128,10 +162,8 @@ class CacheManager:
             return None
         
         key = self._generate_key(cache_type, *args, **kwargs)
-        cache_path = self._get_cache_path(key)
-        
-        # Check if cache file exists
-        if not cache_path.exists():
+
+        if key not in self._data:
             return None
         
         # Check if expired
@@ -139,17 +171,16 @@ class CacheManager:
         if self._is_expired(key, ttl):
             # Clean up expired cache
             try:
-                cache_path.unlink()
+                del self._data[key]
                 del self.metadata[key]
-                self._save_metadata()
+                self._save_bundle()
             except Exception:
                 pass
             return None
         
         # Load and return cached data
         try:
-            with open(cache_path, 'rb') as f:
-                return pickle.load(f)
+            return self._data.get(key)
         except Exception as e:
             print(f"[WARN] Failed to load cache for {cache_type}: {e}")
             return None
@@ -167,12 +198,10 @@ class CacheManager:
             return
         
         key = self._generate_key(cache_type, *args, **kwargs)
-        cache_path = self._get_cache_path(key)
-        
-        # Save data
+
+        # Save data into bundle
         try:
-            with open(cache_path, 'wb') as f:
-                pickle.dump(data, f)
+            self._data[key] = data
             
             # Update metadata
             self.metadata[key] = {
@@ -181,7 +210,7 @@ class CacheManager:
                 'args': args,
                 'kwargs': kwargs
             }
-            self._save_metadata()
+            self._save_bundle()
         except Exception as e:
             print(f"[WARN] Failed to cache {cache_type}: {e}")
     
@@ -198,10 +227,13 @@ class CacheManager:
         if cache_type is None:
             # Clear all cache
             try:
-                for file in self.cache_dir.glob("*.pkl"):
-                    file.unlink()
+                self._data.clear()
                 self.metadata.clear()
-                self._save_metadata()
+                if self.cache_file.exists():
+                    try:
+                        self.cache_file.unlink()
+                    except Exception:
+                        pass
                 print("[INFO] All cache cleared")
             except Exception as e:
                 print(f"[WARN] Failed to clear cache: {e}")
@@ -213,15 +245,14 @@ class CacheManager:
             ]
             
             for key in keys_to_remove:
-                cache_path = self._get_cache_path(key)
                 try:
-                    if cache_path.exists():
-                        cache_path.unlink()
+                    if key in self._data:
+                        del self._data[key]
                     del self.metadata[key]
                 except Exception:
                     pass
             
-            self._save_metadata()
+            self._save_bundle()
             print(f"[INFO] Cache cleared for type: {cache_type}")
     
     def get_stats(self) -> Dict[str, Any]:

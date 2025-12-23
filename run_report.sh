@@ -33,12 +33,15 @@
 #   -q, --quiet     Suppress Python script output (show only status messages)
 #   -k, --keep      Keep auxiliary files (.aux, .log, .out) after compilation
 #   -n, --no-open   Don't prompt to open PDF after generation (macOS only)
+#   -t, --train     Force retrain prediction models (auto-trains if models missing or new data)
 #
 # EXAMPLES:
 #   ./run_report.sh                     # Generate report for default team, current GW
 #   ./run_report.sh 847569              # Generate report for team 847569, current GW
-#   ./run_report.sh 847569 16           # Generate report for team 847569, GW16
+#   ./run_report.sh 847569 17           # Generate report for team 847569, GW17
 #   ./run_report.sh -q 847569           # Quiet mode - less output
+#   ./run_report.sh -t                  # Retrain models first, then generate report
+#   ./run_report.sh --train 847569 17   # Retrain for GW17, then generate report
 #   ./run_report.sh --help              # Show this help message
 #
 # OUTPUT FILES:
@@ -84,15 +87,18 @@ if [[ -f "$CONFIG_FILE" ]]; then
     # Parse YAML with grep/sed (portable, no yq dependency)
     DEFAULT_TEAM_ID=$(grep -E '^team_id:' "$CONFIG_FILE" 2>/dev/null | sed 's/^team_id:[[:space:]]*//' | tr -d ' ')
     DEFAULT_GAMEWEEK=$(grep -E '^gameweek:' "$CONFIG_FILE" 2>/dev/null | sed 's/^gameweek:[[:space:]]*//' | tr -d ' ')
+    DEFAULT_SEASON=$(grep -E '^season:' "$CONFIG_FILE" 2>/dev/null | sed 's/^season:[[:space:]]*//' | tr -d ' "')
     
     # Handle null/empty values
     [[ -z "$DEFAULT_TEAM_ID" || "$DEFAULT_TEAM_ID" == "null" ]] && DEFAULT_TEAM_ID=847569
     [[ "$DEFAULT_GAMEWEEK" == "null" || "$DEFAULT_GAMEWEEK" == "~" ]] && DEFAULT_GAMEWEEK=""
+    [[ -z "$DEFAULT_SEASON" || "$DEFAULT_SEASON" == "null" ]] && DEFAULT_SEASON="2025-26"
 else
     echo "[WARNING] Config file not found: $CONFIG_FILE"
     echo "         Create reports/config.yml to configure your settings."
     DEFAULT_TEAM_ID=847569
     DEFAULT_GAMEWEEK=""
+    DEFAULT_SEASON="2025-26"
 fi
 
 # Auto-detect Python environment
@@ -153,12 +159,16 @@ OPTIONS:
   -q, --quiet     Suppress Python script output (show only status messages)
   -k, --keep      Keep auxiliary files (.aux, .log, .out) after compilation
   -n, --no-open   Don't prompt to open PDF after generation (macOS only)
+  -t, --train     Force retrain prediction models (clears existing models)
+                  Note: Auto-trains if models missing OR new GW data downloaded
 
 EXAMPLES:
   ./run_report.sh                     # Generate for default team, current GW
   ./run_report.sh 847569              # Generate for team 847569, current GW
-  ./run_report.sh 847569 16           # Generate for team 847569, GW16
+  ./run_report.sh 847569 17           # Generate for team 847569, GW17
   ./run_report.sh -q 847569           # Quiet mode - less output
+  ./run_report.sh -t                  # Retrain models first, then generate
+  ./run_report.sh --train 847569 17   # Retrain for GW17, then generate
   ./run_report.sh --help              # Show this help message
 
 OUTPUT FILES:
@@ -194,6 +204,7 @@ EOF
 QUIET_MODE=0
 KEEP_AUX=0
 NO_OPEN=0
+RETRAIN=0
 POSITIONAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -211,6 +222,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -n|--no-open)
             NO_OPEN=1
+            shift
+            ;;
+        -t|--train)
+            RETRAIN=1
             shift
             ;;
         -*)
@@ -282,9 +297,154 @@ fi
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Step 0: Refresh FPL API data (if needed)
+# ─────────────────────────────────────────────────────────────────────────────
+SEASON_DIR="$PROJECT_ROOT/data/$DEFAULT_SEASON"
+GWS_DIR="$SEASON_DIR/gws"
+PLAYERS_RAW="$SEASON_DIR/players_raw.csv"
+
+# Determine target GW for data refresh
+if [[ -n "$GAMEWEEK" ]]; then
+    TARGET_GW="$GAMEWEEK"
+else
+    # Auto-detect current GW from FPL API
+    TARGET_GW=$("$PYTHON_CMD" -c "
+from scraping.fpl_api import get_data
+data = get_data()
+for ev in data.get('events', []):
+    if ev.get('is_current'):
+        print(ev['id'])
+        break
+" 2>/dev/null || echo "")
+fi
+
+# Check if we need to refresh data
+# Note: The scraper creates merged_gw.csv (all GWs combined) and players_raw.csv
+# It only creates individual gwN.csv for the CURRENT gameweek, so we check
+# players_raw.csv freshness instead of specific GW files
+NEED_REFRESH=0
+MERGED_GW_FILE="$GWS_DIR/merged_gw.csv"
+
+if [[ ! -f "$PLAYERS_RAW" ]]; then
+    echo "${YELLOW}[0/4]${NC} players_raw.csv not found, refreshing FPL API data..."
+    NEED_REFRESH=1
+elif [[ ! -f "$MERGED_GW_FILE" ]]; then
+    echo "${YELLOW}[0/4]${NC} merged_gw.csv not found, refreshing FPL API data..."
+    NEED_REFRESH=1
+else
+    # Check if players_raw.csv is stale (more than 6 hours old)
+    if [[ "$(uname)" == "Darwin" ]]; then
+        FILE_AGE=$(( $(date +%s) - $(stat -f%m "$PLAYERS_RAW") ))
+    else
+        FILE_AGE=$(( $(date +%s) - $(stat -c%Y "$PLAYERS_RAW") ))
+    fi
+    SIX_HOURS=$((6 * 60 * 60))
+    if [[ $FILE_AGE -gt $SIX_HOURS ]]; then
+        echo "${YELLOW}[0/4]${NC} FPL data is stale ($(($FILE_AGE / 3600))h old), refreshing..."
+        NEED_REFRESH=1
+    else
+        echo "${GREEN}[0/4]${NC} Using cached FPL data ($(($FILE_AGE / 3600))h old)"
+    fi
+fi
+
+DATA_REFRESHED=0
+if [[ $NEED_REFRESH -eq 1 ]]; then
+    echo "       Running global scraper to fetch latest data..."
+    SCRAPER_EXIT=0
+    if [[ $QUIET_MODE -eq 1 ]]; then
+        "$PYTHON_CMD" -m scraping.global_scraper > /dev/null 2>&1 || SCRAPER_EXIT=$?
+    else
+        "$PYTHON_CMD" -m scraping.global_scraper || SCRAPER_EXIT=$?
+    fi
+    
+    if [[ $SCRAPER_EXIT -ne 0 ]]; then
+        echo "${YELLOW}[WARNING]${NC} Scraper had issues (exit code: $SCRAPER_EXIT)"
+        echo "         Continuing with existing cached data..."
+    else
+        echo "${GREEN}[OK]${NC} FPL data refreshed successfully"
+        DATA_REFRESHED=1
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 0.5: Train prediction models (auto-detect or --train flag)
+# ─────────────────────────────────────────────────────────────────────────────
+TRAIN_SCRIPT="$PROJECT_ROOT/train_fpl_core_predictor.py"
+MODELS_DIR="$PROJECT_ROOT/models/artifacts/fpl_core"
+MODELS_LATEST="$MODELS_DIR/latest.json"
+
+# Auto-detect if models need training
+NEED_TRAIN=0
+TRAIN_REASON=""
+
+if [[ $RETRAIN -eq 1 ]]; then
+    NEED_TRAIN=1
+    TRAIN_REASON="Retraining requested via --train flag"
+elif [[ ! -d "$MODELS_DIR" ]] || [[ ! -f "$MODELS_LATEST" ]]; then
+    NEED_TRAIN=1
+    TRAIN_REASON="No pre-trained models found - training required for predictions"
+elif [[ $DATA_REFRESHED -eq 1 ]]; then
+    NEED_TRAIN=1
+    TRAIN_REASON="New gameweek data downloaded - retraining for updated predictions"
+else
+    # Check if models are stale (older than 7 days)
+    if [[ "$(uname)" == "Darwin" ]]; then
+        MODEL_AGE=$(( $(date +%s) - $(stat -f%m "$MODELS_LATEST") ))
+    else
+        MODEL_AGE=$(( $(date +%s) - $(stat -c%Y "$MODELS_LATEST") ))
+    fi
+    SEVEN_DAYS=$((7 * 24 * 60 * 60))
+    if [[ $MODEL_AGE -gt $SEVEN_DAYS ]]; then
+        echo ""
+        echo "${YELLOW}[0.5/4]${NC} Pre-trained models are stale ($(($MODEL_AGE / 86400)) days old)"
+        echo "         Consider running with --train to refresh models"
+    else
+        echo "${GREEN}[0.5/4]${NC} Using pre-trained models ($(($MODEL_AGE / 86400)) days old)"
+    fi
+fi
+
+# Print training reason if needed
+if [[ $NEED_TRAIN -eq 1 ]]; then
+    echo ""
+    echo "${YELLOW}[0.5/4]${NC} $TRAIN_REASON"
+fi
+
+if [[ $NEED_TRAIN -eq 1 ]]; then
+    if [[ -f "$TRAIN_SCRIPT" ]]; then
+        echo "       Training FPL Core prediction models..."
+        echo "       This uses cross-season data (2024-25 + $DEFAULT_SEASON) for improved accuracy"
+        
+        TRAIN_ARGS=()
+        if [[ $RETRAIN -eq 1 ]]; then
+            TRAIN_ARGS+=("--clear")  # Only clear if explicitly retraining
+        fi
+        if [[ -n "$GAMEWEEK" ]]; then
+            TRAIN_ARGS+=("--gw" "$GAMEWEEK")
+        fi
+        
+        TRAIN_EXIT=0
+        if [[ $QUIET_MODE -eq 1 ]]; then
+            "$PYTHON_CMD" "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}" > /dev/null 2>&1 || TRAIN_EXIT=$?
+        else
+            "$PYTHON_CMD" "$TRAIN_SCRIPT" "${TRAIN_ARGS[@]}" || TRAIN_EXIT=$?
+        fi
+        
+        if [[ $TRAIN_EXIT -ne 0 ]]; then
+            echo "${YELLOW}[WARNING]${NC} Model training had issues (exit code: $TRAIN_EXIT)"
+            echo "         Predictions may be unavailable or degraded..."
+        else
+            echo "${GREEN}[OK]${NC} Models trained successfully"
+        fi
+    else
+        echo "${YELLOW}[WARNING]${NC} Training script not found: $TRAIN_SCRIPT"
+        echo "         Predictions will be unavailable..."
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Step 1: Run Python data fetcher
 # ─────────────────────────────────────────────────────────────────────────────
-echo "${YELLOW}[1/3]${NC} Fetching data and generating LaTeX..."
+echo "${YELLOW}[1/4]${NC} Fetching data and generating LaTeX..."
 
 # Build Python arguments as array for proper handling
 PYTHON_ARGS=("--team" "$TEAM_ID" "--no-pdf")
@@ -324,14 +484,14 @@ echo "${GREEN}[OK]${NC} LaTeX file generated"
 # Step 2: Compile LaTeX to PDF
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "${YELLOW}[2/3]${NC} Compiling PDF (first pass)..."
+echo "${YELLOW}[2/4]${NC} Compiling PDF (first pass)..."
 cd "$REPORTS_DIR"
 
 # First pass (warnings are expected, ignore exit code)
 pdflatex -interaction=nonstopmode "report_${TEAM_ID}.tex" > /dev/null 2>&1 || true
 
 # Second pass for cross-references (hyperlinks, TOC, etc.)
-echo "${YELLOW}[2/3]${NC} Compiling PDF (second pass)..."
+echo "${YELLOW}[2/4]${NC} Compiling PDF (second pass)..."
 pdflatex -interaction=nonstopmode "report_${TEAM_ID}.tex" > /dev/null 2>&1 || true
 
 # Check if PDF was created and has content (success criteria)
@@ -357,13 +517,13 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 if [[ $COMPILE_ERROR -eq 0 ]] && [[ $KEEP_AUX -eq 0 ]]; then
-    echo "${YELLOW}[3/3]${NC} Cleaning up auxiliary files..."
+    echo "${YELLOW}[3/4]${NC} Cleaning up auxiliary files..."
     rm -f "$AUX_FILE" "$LOG_FILE" "$OUT_FILE" 2>/dev/null
     echo "${GREEN}[OK]${NC} Cleanup complete"
 elif [[ $KEEP_AUX -eq 1 ]]; then
-    echo "${YELLOW}[3/3]${NC} Keeping auxiliary files (--keep specified)"
+    echo "${YELLOW}[3/4]${NC} Keeping auxiliary files (--keep specified)"
 else
-    echo "${YELLOW}[3/3]${NC} Skipping cleanup (errors detected)"
+    echo "${YELLOW}[3/4]${NC} Skipping cleanup (errors detected)"
     echo "${YELLOW}[INFO]${NC} Log file preserved: $LOG_FILE"
 fi
 
@@ -384,16 +544,5 @@ else
 fi
 echo "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Open PDF (macOS only, interactive mode only)
-# ─────────────────────────────────────────────────────────────────────────────
-if [[ "$(uname)" == "Darwin" ]] && [[ -f "$PDF_FILE" ]] && [[ $NO_OPEN -eq 0 ]] && [[ -t 0 ]]; then
-    read -q "REPLY?Open PDF in Preview? [y/N] "
-    echo ""
-    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-        open "$PDF_FILE"
-    fi
-fi
 
 exit $COMPILE_ERROR

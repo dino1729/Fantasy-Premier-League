@@ -537,6 +537,22 @@ class FPLCoreInsightsFetcher:
         self.season_cache_dir = self.cache_dir / season
         self.season_cache_dir.mkdir(parents=True, exist_ok=True)
     
+    @property
+    def is_finished_season(self) -> bool:
+        """Check if the season is finished."""
+        try:
+            # Handle both YYYY-YYYY and YYYY-YY formats if needed, but class uses YYYY-YYYY
+            parts = self.season.split('-')
+            if len(parts) == 2:
+                start_year = int(parts[0])
+                end_year = int(parts[1])
+                # Season ends roughly in June of end_year
+                season_end = datetime(end_year, 6, 15)
+                return datetime.now() > season_end
+            return False
+        except Exception:
+            return False
+
     def _download_csv(self, dataset_name: str, gameweek: Optional[int] = None, 
                       force_refresh: bool = False) -> Optional[pd.DataFrame]:
         """Download a CSV dataset from FPL Core Insights.
@@ -561,8 +577,9 @@ class FPLCoreInsightsFetcher:
         # Check cache
         if not force_refresh and cache_file.exists():
             cache_age = time.time() - cache_file.stat().st_mtime
-            if cache_age < self.CACHE_DURATION:
-                logger.info(f"Using cached {dataset_name}.csv (age: {cache_age/3600:.1f}h)")
+            # For finished seasons, cache never expires. For current season, check duration.
+            if self.is_finished_season or cache_age < self.CACHE_DURATION:
+                logger.debug(f"Using cached {dataset_name}.csv")
                 try:
                     return pd.read_csv(cache_file)
                 except Exception as e:
@@ -585,6 +602,20 @@ class FPLCoreInsightsFetcher:
             logger.info(f"Downloaded {dataset_name}.csv ({len(df)} rows)")
             return df
             
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                logger.warning(f"Dataset {dataset_name} not found at {url_path} (404). Skipping.")
+                # Fall back to cached data if available (even if stale/partial)
+                if cache_file.exists():
+                    logger.info(f"Using existing cached {dataset_name}.csv despite 404")
+                    return pd.read_csv(cache_file)
+                return None
+            else:
+                logger.error(f"HTTP error downloading {dataset_name}: {e}")
+                if cache_file.exists():
+                    return pd.read_csv(cache_file)
+                return None
+                
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to download {dataset_name}: {e}")
             

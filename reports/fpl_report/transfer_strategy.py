@@ -50,10 +50,73 @@ class TransferStrategyPlanner:
         self.recommender = transfer_recommender
         self.predictor = transfer_recommender.predictor
         
+        # Store FPL Core data references for the new predictor
+        self.all_gw_data = getattr(transfer_recommender, 'all_gw_data', None)
+        self.fpl_core_season_data = getattr(transfer_recommender, 'fpl_core_season_data', None)
+        self.current_gw = getattr(transfer_recommender, 'current_gw', None)
+        self._use_fpl_core_predictor = getattr(transfer_recommender, '_fpl_core_predictor_ready', False)
+        
+        # Cross-season training data (from recommender)
+        self.prev_all_gw_data = getattr(transfer_recommender, 'prev_all_gw_data', None)
+        self.prev_fpl_core_season_data = getattr(transfer_recommender, 'prev_fpl_core_season_data', None)
+        self.prev_season_start_year = getattr(transfer_recommender, 'prev_season_start_year', None)
+        self.current_season_start_year = getattr(transfer_recommender, 'current_season_start_year', None)
+        self._cross_season_available = getattr(transfer_recommender, '_cross_season_available', False)
+        
         # Access new inference pipeline if available
         self.inference_pipeline = getattr(transfer_recommender, 'inference_pipeline', None)
         if self.inference_pipeline:
             print("TransferStrategyPlanner: Using position-specific ML models")
+    
+    def _ensure_predictor_trained(self):
+        """Ensure the prediction model is trained.
+        
+        First tries to load pre-trained models from disk (faster).
+        Falls back to training from scratch if no saved models found.
+        """
+        from .fpl_core_predictor import FPLCorePredictor
+        
+        if self.predictor.is_trained:
+            return
+            
+        if self._use_fpl_core_predictor and isinstance(self.predictor, FPLCorePredictor):
+            # Try loading pre-trained models from disk first
+            if self.predictor.load_from_disk():
+                print("TransferStrategyPlanner: Using pre-trained FPL Core Predictor models")
+                return
+            
+            # Fall back to training if no saved models
+            print("TransferStrategyPlanner: No pre-trained models found, training from scratch...")
+            
+            # Use cross-season training if previous season data is available
+            if self._cross_season_available:
+                self.predictor.train_cross_season(
+                    prev_all_gw_data=self.prev_all_gw_data,
+                    prev_fpl_core_season_data=self.prev_fpl_core_season_data,
+                    prev_season_start_year=self.prev_season_start_year,
+                    current_all_gw_data=self.all_gw_data,
+                    current_fpl_core_season_data=self.fpl_core_season_data,
+                    current_season_start_year=self.current_season_start_year,
+                    current_gw=self.current_gw,
+                )
+            else:
+                self.predictor.train(self.all_gw_data, self.fpl_core_season_data, self.current_gw)
+        else:
+            all_players = self.fetcher.players_df
+            train_ids = all_players[all_players['minutes'] >= 450]['id'].tolist()[:200]
+            self.predictor.train(train_ids)
+    
+    def _predict_multiple_gws(self, player_ids: List[int], num_gws: int = 5) -> Dict:
+        """Wrapper for predict_multiple_gws that handles both predictor types."""
+        from .fpl_core_predictor import FPLCorePredictor
+        
+        if self._use_fpl_core_predictor and isinstance(self.predictor, FPLCorePredictor):
+            return self.predictor.predict_multiple_gws(
+                self.all_gw_data, self.fpl_core_season_data,
+                player_ids, self.current_gw, num_gws
+            )
+        else:
+            return self.predictor.predict_multiple_gws(player_ids, num_gws)
         
     def generate_strategy(self, squad_analysis: List[Dict], 
                           num_weeks: int = 5,
@@ -91,12 +154,10 @@ class TransferStrategyPlanner:
         
         # Ensure model is trained
         if not self.predictor.is_trained:
-            all_players = self.fetcher.players_df
-            train_ids = all_players[all_players['minutes'] >= 450]['id'].tolist()[:200]
-            self.predictor.train(train_ids)
+            self._ensure_predictor_trained()
         
         # Get multi-GW predictions for squad
-        squad_predictions = self.predictor.predict_multiple_gws(squad_ids, num_weeks)
+        squad_predictions = self._predict_multiple_gws(squad_ids, num_weeks)
         
         # Analyze fixtures for each player
         fixture_analysis = self._analyze_squad_fixtures(squad_analysis, num_weeks)
@@ -236,7 +297,7 @@ class TransferStrategyPlanner:
             all_ids = list(set(squad_ids + top_players))
             
             # Get predictions
-            predictions = self.predictor.predict_multiple_gws(all_ids, num_weeks)
+            predictions = self._predict_multiple_gws(all_ids, num_weeks)
             
             # Convert to xP matrix format {id: [xp1, xp2, ...]}
             xp_matrix = {}
@@ -422,7 +483,7 @@ class TransferStrategyPlanner:
             
             # Get multi-GW predictions for candidates
             candidate_ids = candidates['id'].tolist()[:30]
-            candidate_predictions = self.predictor.predict_multiple_gws(candidate_ids, num_weeks)
+            candidate_predictions = self._predict_multiple_gws(candidate_ids, num_weeks)
             
             # Score and rank candidates
             scored_candidates = []
@@ -566,7 +627,7 @@ class TransferStrategyPlanner:
         # Batch predict (5 weeks horizon)
         predictions = {}
         if all_ids:
-            predictions = self.predictor.predict_multiple_gws(all_ids, num_gws=5)
+            predictions = self._predict_multiple_gws(all_ids, num_gws=5)
         
         # Match transfers (N out, M in - we try to pair them for display)
         # Since logic replaces X with Y, we just list them.
@@ -1294,6 +1355,7 @@ class FreeHitOptimizer:
         teams_data: Optional[List[Dict]] = None,
         fixtures_data: Optional[List[Dict]] = None,
         current_gw: int = 1,
+        target_gw: int = None,
         predictions: Optional[Dict] = None
     ):
         """Initialize the Free Hit optimizer.
@@ -1308,14 +1370,16 @@ class FreeHitOptimizer:
             strategy: One of 'safe', 'balanced', 'aggressive'.
             teams_data: List of team dicts from bootstrap data (for team names).
             fixtures_data: List of fixture dicts for FDR lookup.
-            current_gw: Current gameweek number for fixture calculation.
-            predictions: Optional dict of {player_id: prediction_data} with cumulative 5-GW xP.
+            current_gw: Current gameweek number.
+            target_gw: Target GW for Free Hit (fixtures are optimized for this GW).
+            predictions: Optional dict of {player_id: prediction_data} with multi-GW xP.
         """
         self.players_df = players_df.copy()
         self.total_budget = total_budget
         self.league_ownership = league_ownership or {}
         self.strategy = strategy
         self.current_gw = current_gw
+        self.target_gw = target_gw if target_gw else current_gw + 1
         self.predictions = predictions or {}
         
         # Build team ID -> short name mapping
@@ -1348,13 +1412,13 @@ class FreeHitOptimizer:
         }
     
     def _build_fixture_map(self, fixtures_data: List[Dict]):
-        """Build a map of team_id -> list of next 5 fixtures with FDR."""
-        # Group fixtures by team
+        """Build a map of team_id -> fixture for target GW (and next 5 for context)."""
+        # Group fixtures by team, prioritizing target GW
         for team_id in range(1, 21):  # FPL teams are 1-20
             team_fixtures = []
             for fix in fixtures_data:
                 event = fix.get('event')
-                if event is None or event <= self.current_gw:
+                if event is None:
                     continue
                 
                 if fix.get('team_h') == team_id:
@@ -1375,9 +1439,12 @@ class FreeHitOptimizer:
                     'is_home': is_home
                 })
             
-            # Sort by gameweek and take first 5
+            # Sort by gameweek
             team_fixtures.sort(key=lambda x: x['gw'])
-            self.team_fixtures[team_id] = team_fixtures[:5]
+            
+            # Filter to target GW and beyond (for Free Hit, we care about target GW fixture)
+            target_fixtures = [f for f in team_fixtures if f['gw'] >= self.target_gw]
+            self.team_fixtures[team_id] = target_fixtures[:5] if target_fixtures else team_fixtures[-5:]
         
     def _is_available(self, row) -> bool:
         """Check if player is available to play."""
@@ -1392,40 +1459,90 @@ class FreeHitOptimizer:
     def _calculate_score(self, row) -> float:
         """Calculate Free Hit score optimized for single GW performance.
         
-        Primary: ep_next (expected points next round)
-        Secondary: form and recent performance as tiebreakers
-        Adjustment: Differential bonus based on league ownership
+        Components:
+        1. ML predictions (fixture-aware) - primary if available
+        2. ep_next from FPL API - fallback
+        3. Fixture difficulty bonus - boost players with easy fixtures
+        4. Home advantage bonus
+        5. Differential bonus - based on league ownership
         """
         player_id = int(row.get('id', 0))
+        team_id = int(row.get('team', 0) or 0)
         
-        # Primary: Expected points next GW (from FPL API)
-        ep_next = float(row.get('ep_next', 0) or 0)
+        # -----------------------------------------------------------------
+        # 1. Base score: Use ML predictions if available (fixture-aware)
+        # -----------------------------------------------------------------
+        base_score = 0.0
         
-        # Fallback to form-based estimate if ep_next is missing/zero
-        if ep_next <= 0:
-            form = float(row.get('form', 0) or 0)
-            ppg = float(row.get('points_per_game', 0) or 0)
-            # Rough estimate: average of form and ppg
-            ep_next = (form + ppg) / 2.0
+        if self.predictions and player_id in self.predictions:
+            pred_data = self.predictions[player_id]
+            # Predictions are indexed from current_gw+1
+            # So for target_gw, we need index = target_gw - current_gw - 1
+            preds = pred_data.get('predictions', [])
+            pred_index = self.target_gw - self.current_gw - 1
+            if preds and 0 <= pred_index < len(preds):
+                base_score = preds[pred_index]
         
-        # Base score is expected points
-        base_score = ep_next
+        # Fallback to ep_next if no ML prediction
+        if base_score <= 0:
+            ep_next = float(row.get('ep_next', 0) or 0)
+            if ep_next > 0:
+                base_score = ep_next
+            else:
+                # Last resort: form-based estimate
+                form = float(row.get('form', 0) or 0)
+                ppg = float(row.get('points_per_game', 0) or 0)
+                base_score = (form + ppg) / 2.0
         
-        # Apply differential bonus if league ownership data is available
+        # -----------------------------------------------------------------
+        # 2. Fixture difficulty bonus (FDR) - CRITICAL for Free Hit
+        # -----------------------------------------------------------------
+        fixture_bonus = 0.0
+        home_bonus = 0.0
+        
+        if team_id in self.team_fixtures and self.team_fixtures[team_id]:
+            next_fix = self.team_fixtures[team_id][0]  # Target GW fixture
+            fdr = next_fix.get('fdr', 3)
+            is_home = next_fix.get('is_home', False)
+            
+            # FDR bonus: Lower FDR = easier fixture = SIGNIFICANT bonus
+            # For Free Hit, fixture is crucial - amplify the impact
+            # FDR 1 = +3.0, FDR 2 = +1.5, FDR 3 = 0, FDR 4 = -1.5, FDR 5 = -3.0
+            fdr_bonus_map = {1: 3.0, 2: 1.5, 3: 0.0, 4: -1.5, 5: -3.0}
+            fixture_bonus = fdr_bonus_map.get(fdr, 0.0)
+            
+            # Home advantage bonus (meaningful for Free Hit)
+            if is_home:
+                home_bonus = 1.0
+        
+        # -----------------------------------------------------------------
+        # 3. Differential bonus (league ownership)
+        # -----------------------------------------------------------------
         diff_bonus = 0.0
         if self.ownership_map and self.sample_size > 0:
-            # Get league ownership (0-1), default to 0 if not in league
             league_own = self.ownership_map.get(player_id, 0.0)
             
-            # Differential bonus: higher bonus for lower ownership
-            # Formula: bonus = base * (1 - ownership)^2
-            # Squared to give stronger bonus to true differentials
+            # Differential bonus: higher for lower ownership
             params = self.strategy_params.get(self.strategy, self.strategy_params['balanced'])
             diff_multiplier = params['diff_bonus']
             diff_bonus = diff_multiplier * ((1 - league_own) ** 2)
         
-        # Total score
-        score = base_score + diff_bonus
+        # -----------------------------------------------------------------
+        # 4. Value premium bonus (encourages spending budget on Free Hit)
+        # -----------------------------------------------------------------
+        price = float(row.get('price', 0) or row.get('now_cost', 0) / 10.0)
+        # Premium players (8m+) get a small bonus to encourage spending
+        # This helps ensure we use the full budget on quality players
+        value_bonus = 0.0
+        if price >= 10.0:
+            value_bonus = 1.0  # Premium (10m+)
+        elif price >= 8.0:
+            value_bonus = 0.5  # Mid-premium (8-10m)
+        
+        # -----------------------------------------------------------------
+        # 5. Total score
+        # -----------------------------------------------------------------
+        score = base_score + fixture_bonus + home_bonus + diff_bonus + value_bonus
         
         return round(score, 3)
     

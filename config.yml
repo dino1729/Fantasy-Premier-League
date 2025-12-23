@@ -34,7 +34,7 @@ competitors:
 
 # Target gameweek to analyze (1-38)
 # Set to null to auto-detect the current/most recent completed gameweek.
-gameweek: 16
+gameweek: 17
 
 # Season identifier (used for data folder paths)
 season: "2025-26"
@@ -48,7 +48,7 @@ season: "2025-26"
 
 free_hit:
   # Target gameweek for Free Hit draft (null = next deadline GW)
-  target_gw: null
+  target_gw: 18
   
   # Strategy mode - how aggressive to be with differentials:
   #   "safe"       - Maximize overlap with league template, minimal differentials
@@ -122,6 +122,65 @@ league:
   # Number of teams to sample from league (5-50)
   # Higher = more accurate ownership data but slower.
   sample_size: 20
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CACHE SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════
+# Session-based caching speeds up report generation by caching API responses.
+# Each report run creates one cache file instead of 50-100 individual files.
+
+cache:
+  # Session time-to-live in seconds (600-7200)
+  # How long before cached data expires and needs to be re-fetched.
+  # 3600 = 1 hour (recommended for live gameweeks)
+  session_ttl: 36000
+  
+  # Maximum number of session files to keep (5-20)
+  # Older sessions are automatically deleted when limit is exceeded.
+  max_sessions: 10
+  
+  # Automatic cleanup on each run (true/false)
+  # If true, deletes expired session files when generating reports.
+  auto_cleanup: true
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DATA SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════
+# Controls data freshness and player filtering thresholds.
+
+data:
+  # Data staleness threshold in hours (1-24)
+  # If local data is older than this, the scraper will refresh from FPL API.
+  staleness_hours: 6
+  
+  # Minimum minutes played for player analysis (0-900)
+  # Players with fewer minutes are excluded from peer comparisons.
+  min_minutes: 90
+  
+  # Number of top players to generate predictions for (50-500)
+  # Higher = more candidates for Wildcard/Free Hit drafts but slower.
+  top_players_pool: 200
+
+  # Cross-season training data (true/false)
+  # If true, includes previous season (2024-25) data when training the model.
+  # This provides more training samples but may dilute recent trends.
+  use_cross_season_data: true
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMPETITIVE ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════
+# Settings for comparing your team against others.
+
+competitive:
+  # Number of top global managers to compare against (1-10)
+  # These appear in the "vs Top Global Managers" section.
+  top_global_count: 3
+  
+  # Number of gameweeks to show in transfer history comparison (3-10)
+  transfer_history_gws: 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════

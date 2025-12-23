@@ -51,8 +51,6 @@ The codebase is organized into functional directories:
   - `generate_fpl_report.py` - Report generation CLI (primary)
   - `run_report.sh` - Shell wrapper for report generation
   - `main.py` - Full pipeline orchestrator
-  - `global_scraper.py` - Data scraping entry point
-  - `global_merger.py` - Data merging entry point
   - `config.yml` - Configuration file
 
 ## Architecture Overview (Report Pipeline)
@@ -67,15 +65,13 @@ The codebase is organized into functional directories:
 
 ## Build, Test, and Development Commands
 
-> **Important:** GW17 is ongoing. Please use **GW16** for all report generation and testing commands until further notice.
-
 - Always activate the repo's virtualenv first: `source venv/bin/activate` (macOS/Linux)
 - If you don't want to rely on activation, use the repo wrappers: `bash scripts/py ...` and `bash scripts/pip ...`
 - Install deps: `python -m pip install -r requirements.txt`
-- Refresh current-season data: `python global_scraper.py` (writes into `data/<season>/`)
-- Merge multi-season data: `python global_merger.py`
-- Preferred report entrypoint: `./run_report.sh <TEAM_ID> 16` (requires `zsh`, internet, and `pdflatex` for PDF)
-- (Alternative) Generate LaTeX only: `python generate_fpl_report.py --team <TEAM_ID> --season 2025-26 --gw 16 --no-pdf`
+- Refresh current-season data: `python -m scraping.global_scraper` (writes into `data/<season>/`)
+- Merge multi-season data: `python -m processing.global_merger`
+- Preferred report entrypoint: `./run_report.sh <TEAM_ID> [GAMEWEEK]` (requires `zsh`, internet, and `pdflatex` for PDF)
+- (Alternative) Generate LaTeX only: `python generate_fpl_report.py --team <TEAM_ID> --gw <N> --no-pdf`
 - Run unit tests: `python -m unittest discover -s tests -v`
 
 ## Coding Style & Naming Conventions
@@ -86,17 +82,12 @@ The codebase is organized into functional directories:
 
 ## Import Patterns
 
-Use the new import paths:
+Use the module import paths:
 ```python
 from scraping.fpl_api import get_data
 from processing.parsers import parse_players
 from utils.utility import uprint
 from reports.fpl_report.data_fetcher import FPLDataFetcher
-```
-
-Legacy imports work but show deprecation warnings:
-```python
-from getters import get_data  # Deprecated
 ```
 
 ## Testing Guidelines
@@ -111,5 +102,6 @@ from getters import get_data  # Deprecated
 
 ## Data & Generated Artifacts
 
-- Keep season folder naming consistent (`YYYY-YY`) and avoid mixing generated outputs with source data unless the output is part of the published dataset.
-- Do not commit local artifacts like `venv/`, `.pytest_cache/`, or `__pycache__/` (see `.gitignore`).
+- Data files are not tracked in git (see `.gitignore`).
+- Keep season folder naming consistent (`YYYY-YY`) and avoid mixing generated outputs with source data.
+- Do not commit local artifacts like `venv/`, `.pytest_cache/`, or `__pycache__/`.

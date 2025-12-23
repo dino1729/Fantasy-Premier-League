@@ -15,7 +15,8 @@ import subprocess
 import sys
 import os
 from pathlib import Path
-import yaml
+from datetime import datetime
+import copy
 
 from reports.fpl_report.data_fetcher import (
     FPLDataFetcher, 
@@ -30,68 +31,29 @@ from reports.fpl_report.latex_generator import LaTeXReportGenerator
 from reports.fpl_report.plot_generator import PlotGenerator
 from reports.fpl_report.transfer_strategy import TransferStrategyPlanner, WildcardOptimizer, FreeHitOptimizer
 from reports.fpl_report.cache_manager import CacheManager
+from reports.fpl_report.session_cache import SessionCacheManager
 from etl.fetchers import FPLCoreInsightsFetcher
 
-
-def load_config() -> dict:
-    """Load configuration from config.yml in reports directory.
-    
-    Returns:
-        Dict with config values or empty dict if not found.
-    """
-    # Try config.yml in project root first, then in reports/
-    config_path = Path(__file__).parent / 'config.yml'
-    if not config_path.exists():
-        config_path = Path(__file__).parent / 'reports' / 'config.yml'
-    if config_path.exists():
-        try:
-            with open(config_path, 'r') as f:
-                return yaml.safe_load(f) or {}
-        except Exception:
-            return {}
-    return {}
-
-
-# Load config at module level
-_CONFIG = load_config()
-
-# --- Team Settings ---
-DEFAULT_TEAM_ID = _CONFIG.get('team_id', 847569)
-DEFAULT_COMPETITORS = _CONFIG.get('competitors', [21023, 1827604, 489166])
-
-# --- Gameweek & Season ---
-DEFAULT_GAMEWEEK = _CONFIG.get('gameweek')  # None = auto-detect
-DEFAULT_SEASON = _CONFIG.get('season', '2025-26')
-
-# --- Free Hit Settings ---
-_FREE_HIT = _CONFIG.get('free_hit', {})
-FREE_HIT_TARGET_GW = _FREE_HIT.get('target_gw')
-FREE_HIT_STRATEGY = _FREE_HIT.get('strategy', 'balanced')
-
-# --- Wildcard Settings ---
-_WILDCARD = _CONFIG.get('wildcard', {})
-WILDCARD_STRATEGY = _WILDCARD.get('strategy', 'balanced')
-
-# --- Transfer Planner ---
-_TRANSFER = _CONFIG.get('transfer_planner', {})
-TRANSFER_HORIZON = _TRANSFER.get('horizon', 5)
-FREE_TRANSFERS_OVERRIDE = _TRANSFER.get('free_transfers')
-
-# --- MIP Solver ---
-_MIP = _CONFIG.get('mip_solver', {})
-MIP_ENABLED = _MIP.get('enabled', True)
-MIP_TIME_LIMIT = _MIP.get('time_limit', 60)
-MIP_CANDIDATE_POOL = _MIP.get('candidate_pool', 30)
-
-# --- League Settings ---
-_LEAGUE = _CONFIG.get('league', {})
-LEAGUE_ID = _LEAGUE.get('league_id')
-LEAGUE_SAMPLE_SIZE = _LEAGUE.get('sample_size', 20)
-
-# --- Output Options ---
-_OUTPUT = _CONFIG.get('output', {})
-NO_COMPETITIVE = _OUTPUT.get('no_competitive', False)
-VERBOSE = _OUTPUT.get('verbose', False)
+# Import centralized configuration
+from utils.config import (
+    TEAM_ID as DEFAULT_TEAM_ID,
+    COMPETITORS as DEFAULT_COMPETITORS,
+    GAMEWEEK as DEFAULT_GAMEWEEK,
+    SEASON as DEFAULT_SEASON,
+    FREE_HIT_TARGET_GW,
+    FREE_HIT_STRATEGY,
+    WILDCARD_STRATEGY,
+    TRANSFER_HORIZON,
+    FREE_TRANSFERS_OVERRIDE,
+    MIP_ENABLED,
+    MIP_TIME_LIMIT,
+    MIP_CANDIDATE_POOL,
+    LEAGUE_ID,
+    LEAGUE_SAMPLE_SIZE,
+    NO_COMPETITIVE,
+    VERBOSE,
+    CACHE,
+)
 
 
 def parse_args():
@@ -163,27 +125,64 @@ def main():
     """Main entry point."""
     args = parse_args()
 
-    # Handle cache commands
-    cache_mgr = CacheManager(enabled=not args.no_cache)
+    # Determine if caching is enabled
+    use_cache = not args.no_cache
     
+    # Get gameweek early for session cache initialization (will be refined later)
+    # For now, use a placeholder - we'll update it after fetching team data
+    preliminary_gameweek = args.gw
+    
+    # Handle cache stats command (show legacy cache manager stats)
     if args.cache_stats:
-        stats = cache_mgr.get_stats()
+        # Show session cache stats
+        cache_dir = Path(__file__).parent / "reports" / "cache"
+        session_files = list(cache_dir.glob("session_*.pkl"))
+        
         print(f"\n{'='*60}")
-        print(f"  Cache Statistics")
+        print(f"  Session Cache Statistics")
         print(f"{'='*60}")
-        print(f"  Enabled: {stats.get('enabled', False)}")
-        if stats.get('enabled'):
-            print(f"  Cache Directory: {stats.get('cache_dir', 'N/A')}")
-            print(f"  Total Entries: {stats.get('total_entries', 0)}")
-            print(f"\n  Entries by Type:")
-            for cache_type, count in stats.get('by_type', {}).items():
-                print(f"    - {cache_type}: {count}")
+        print(f"  Cache Directory: {cache_dir}")
+        print(f"  Total Sessions: {len(session_files)}")
+        
+        if session_files:
+            print(f"\n  Active Sessions:")
+            for sf in sorted(session_files, key=lambda x: x.stat().st_mtime, reverse=True):
+                size_mb = sf.stat().st_size / (1024 * 1024)
+                mtime = datetime.fromtimestamp(sf.stat().st_mtime)
+                age = datetime.now() - mtime
+                age_str = f"{int(age.total_seconds() / 60)}m ago" if age.total_seconds() < 3600 else f"{int(age.total_seconds() / 3600)}h ago"
+                print(f"    - {sf.name}")
+                print(f"      Size: {size_mb:.2f} MB | Age: {age_str}")
+        
         print(f"{'='*60}\n")
         return
     
+    # Handle clear cache command
     if args.clear_cache:
-        print("[INFO] Clearing cache...")
-        cache_mgr.invalidate()
+        print("[INFO] Clearing all cache files...")
+        cache_dir = Path(__file__).parent / "reports" / "cache"
+        deleted = 0
+
+        # Delete all pickle cache files (legacy md5 cache + session cache)
+        for pkl_file in cache_dir.glob("*.pkl"):
+            try:
+                pkl_file.unlink()
+                deleted += 1
+            except Exception as e:
+                print(f"[WARN] Failed to delete {pkl_file.name}: {e}")
+
+        # Delete legacy cache metadata files if present
+        for meta_name in ("cache_metadata.json", "session_metadata.json"):
+            meta_path = cache_dir / meta_name
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                    deleted += 1
+                except Exception as e:
+                    print(f"[WARN] Failed to delete {meta_path.name}: {e}")
+
+        print(f"[INFO] Cleared {deleted} cache file(s)")
+        return
     
     # Validate team_id is provided for report generation
     if not args.team:
@@ -194,20 +193,42 @@ def main():
     team_id = args.team
     season = args.season
     verbose = args.verbose
-    use_cache = not args.no_cache
 
     print(f"\n{'='*60}")
     print(f"  FPL Report Generator")
     print(f"  Team ID: {team_id} | Season: {season}")
     if use_cache:
-        print(f"  Cache: Enabled")
+        print(f"  Cache: Enabled (Session-based)")
     else:
         print(f"  Cache: Disabled")
     print(f"{'='*60}\n")
 
+    # Initialize temporary fetcher to get current gameweek if not specified
+    if preliminary_gameweek is None:
+        temp_fetcher = FPLDataFetcher(team_id, season, use_cache=False)
+        preliminary_gameweek = temp_fetcher.get_current_gameweek()
+        log(f"Auto-detected gameweek: {preliminary_gameweek}", verbose)
+    
+    # Initialize session cache manager
+    session_cache = None
+    if use_cache:
+        # Get cache settings from centralized config
+        session_ttl = CACHE.get('session_ttl', 3600)
+        max_sessions = CACHE.get('max_sessions', 10)
+        
+        session_cache = SessionCacheManager(
+            team_id=team_id,
+            gameweek=preliminary_gameweek,
+            ttl=session_ttl,
+            max_sessions=max_sessions,
+            enabled=True,
+            single_file=True
+        )
+        log(f"Session cache initialized: {session_cache.session_id}", verbose)
+    
     # Initialize components
     log("Initializing data fetcher...", verbose)
-    fetcher = FPLDataFetcher(team_id, season, use_cache=use_cache)
+    fetcher = FPLDataFetcher(team_id, season, use_cache=use_cache, session_cache=session_cache)
     
     # Get current gameweek if not specified
     gameweek = args.gw or fetcher.get_current_gameweek()
@@ -219,6 +240,9 @@ def main():
     fpl_core_season = season.replace("-", "-20") if len(season.split("-")[1]) == 2 else season
     fpl_core_fetcher = FPLCoreInsightsFetcher(season=fpl_core_season)
     
+    # Extract season start year (e.g., 2025 from "2025-2026")
+    current_season_start_year = int(fpl_core_season.split("-")[0])
+    
     # Fetch season-level data
     log("  Fetching season-level data...", verbose)
     fpl_core_season_data = fpl_core_fetcher.fetch_all()
@@ -226,6 +250,61 @@ def main():
     # Fetch ALL gameweek data from GW1 to current GW (for historical analysis)
     log(f"  Fetching all gameweek data (GW1-GW{gameweek})...", verbose)
     all_gw_data = fpl_core_fetcher.fetch_all_gameweeks(up_to_gw=gameweek)
+    # Prediction context (may include next-GW fixtures), keep historical data immutable
+    all_gw_data_pred = copy.deepcopy(all_gw_data)
+    
+    # Check for pre-trained models (trained with cross-season data)
+    # If available, skip fetching previous season data (faster startup)
+    prev_season_start_year = current_season_start_year - 1
+    prev_fpl_core_season = f"{prev_season_start_year}-{prev_season_start_year + 1}"
+    prev_all_gw_data = None
+    prev_fpl_core_season_data = None
+    
+    # Check if pre-trained models exist
+    from pathlib import Path
+    pretrained_models_dir = Path(__file__).parent / 'models' / 'artifacts' / 'fpl_core'
+    pretrained_available = (pretrained_models_dir / 'latest.json').exists()
+    
+    if pretrained_available:
+        log(f"  Pre-trained cross-season models found - skipping previous season data fetch", verbose)
+        log(f"    Models will be loaded from: {pretrained_models_dir}", verbose)
+    else:
+        log(f"  Fetching previous season data ({prev_fpl_core_season}) for training...", verbose)
+        try:
+            prev_fpl_core_fetcher = FPLCoreInsightsFetcher(season=prev_fpl_core_season)
+            prev_fpl_core_season_data = prev_fpl_core_fetcher.fetch_all()
+            prev_all_gw_data = prev_fpl_core_fetcher.fetch_all_gameweeks(up_to_gw=38)
+            
+            if prev_fpl_core_season_data and prev_all_gw_data:
+                prev_gw_count = len([gw for gw in prev_all_gw_data.values() 
+                                   if gw.get('playermatchstats') is not None])
+                log(f"    Previous season: {prev_gw_count} GWs with match stats available", verbose)
+            else:
+                log(f"    Previous season data not fully available", verbose)
+                prev_all_gw_data = None
+                prev_fpl_core_season_data = None
+        except Exception as e:
+            log(f"    Could not fetch previous season data: {e}", verbose)
+            prev_all_gw_data = None
+            prev_fpl_core_season_data = None
+    
+    # Fetch next GW fixtures/teams for prediction context (if available)
+    next_gw = gameweek + 1
+    log(f"  Fetching next GW ({next_gw}) fixture data for predictions...", verbose)
+    try:
+        next_gw_fixtures = fpl_core_fetcher.get_fixtures(gameweek=next_gw)
+        next_gw_teams = fpl_core_fetcher.get_teams(gameweek=next_gw)
+        
+        if next_gw_fixtures is not None or next_gw_teams is not None:
+            all_gw_data_pred[next_gw] = {
+                'fixtures': next_gw_fixtures,
+                'teams': next_gw_teams,
+            }
+            log(f"    Next GW fixtures available: {len(next_gw_fixtures) if next_gw_fixtures is not None else 0} rows", verbose)
+        else:
+            log(f"    Next GW fixtures not yet available", verbose)
+    except Exception as e:
+        log(f"    Could not fetch next GW fixtures: {e}", verbose)
     
     # Extract current gameweek data for convenience
     fpl_core_gw_data = all_gw_data.get(gameweek, {})
@@ -305,9 +384,27 @@ def main():
 
         squad_analysis.append(analysis)
 
-    # Initialize recommender
+    # Add FPL API fixtures as fallback for future GW predictions
+    # This allows the FPL Core predictor to use fixture data even when
+    # Core Insights hasn't updated with future GW fixtures yet
+    fpl_core_season_data['fpl_api_fixtures'] = fetcher.fixtures_df
+    
+    # Initialize recommender with FPL Core data for enhanced predictions
+    # Pass previous season data for cross-season training (if available)
     log("Generating transfer recommendations...", verbose)
-    recommender = TransferRecommender(fetcher, analyzer)
+    recommender = TransferRecommender(
+        fetcher, analyzer,
+        use_new_models=True,
+        use_fpl_core_predictor=True,
+        all_gw_data=all_gw_data_pred,
+        fpl_core_season_data=fpl_core_season_data,
+        current_gw=gameweek,
+        # Cross-season training data (optional)
+        prev_all_gw_data=prev_all_gw_data,
+        prev_fpl_core_season_data=prev_fpl_core_season_data,
+        prev_season_start_year=prev_season_start_year,
+        current_season_start_year=current_season_start_year,
+    )
 
     # Get underperformers and recommendations (legacy)
     underperformers = recommender.identify_underperformers(squad_analysis)
@@ -389,7 +486,8 @@ def main():
         if predictor and predictor.is_trained:
             # Get top 200 players by total_points as draft candidates
             top_players = fetcher.players_df.nlargest(200, 'total_points')['id'].tolist()
-            all_player_predictions = predictor.predict_multiple_gws(top_players, num_gws=5)
+            # Use the wrapper method to handle both predictor types
+            all_player_predictions = strategy_planner._predict_multiple_gws(top_players, num_gws=5)
             print(f"  Generated predictions for {len(all_player_predictions)} players")
         else:
             print("  Predictor not trained, skipping draft predictions")
@@ -408,6 +506,96 @@ def main():
     # Pass season_history to treemap so it only counts points when players were in starting XI
     plot_gen.generate_treemap(season_history)
     plot_gen.generate_transfer_matrix(transfers)
+    
+    # Generate advanced finishing & creativity plots from FPL Core Insights data
+    log("Generating advanced finishing & creativity analysis...", verbose)
+    squad_ids = [p['id'] for p in squad]
+    try:
+        # Clinical vs Wasteful Goals (league-wide context)
+        plot_gen.generate_clinical_wasteful_chart(
+            fpl_core_season_data,
+            fpl_core_gw_data,
+            squad_ids,
+            gameweek
+        )
+        # Clinical vs Wasteful Goals (squad-only)
+        plot_gen.generate_clinical_wasteful_chart_squad_only(
+            fpl_core_season_data,
+            fpl_core_gw_data,
+            squad_ids,
+            gameweek
+        )
+        # Clutch vs Frustrated Assists (league-wide context)
+        plot_gen.generate_clutch_frustrated_chart(
+            fpl_core_season_data,
+            fpl_core_gw_data,
+            squad_ids,
+            gameweek
+        )
+        # Clutch vs Frustrated Assists (squad-only)
+        plot_gen.generate_clutch_frustrated_chart_squad_only(
+            fpl_core_season_data,
+            fpl_core_gw_data,
+            squad_ids,
+            gameweek
+        )
+        # Usage vs Output Scatter (league-wide context)
+        plot_gen.generate_usage_output_scatter(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids
+        )
+        # Usage vs Output Scatter (recent form - league-wide, last 5 GWs)
+        plot_gen.generate_usage_output_scatter_recent(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids,
+            last_n_gw=5
+        )
+        # Usage vs Output Scatter (squad-only)
+        plot_gen.generate_usage_output_scatter_squad_only(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids,
+            gameweek
+        )
+        # Usage vs Output Scatter (recent form - squad-only, last 5 GWs)
+        plot_gen.generate_usage_output_scatter_squad_recent(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids,
+            gameweek,
+            last_n_gw=5
+        )
+        # Defensive Value Charts (season)
+        plot_gen.generate_defensive_value_scatter(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids
+        )
+        # Defensive Value Charts (recent form - last 5 GWs)
+        plot_gen.generate_defensive_value_scatter_recent(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids,
+            last_n_gw=5
+        )
+        # Goalkeeper Shot-Stopping Charts (season)
+        plot_gen.generate_goalkeeper_value_scatter(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids
+        )
+        # Goalkeeper Shot-Stopping Charts (recent form - last 5 GWs)
+        plot_gen.generate_goalkeeper_value_scatter_recent(
+            all_gw_data,
+            fpl_core_season_data,
+            squad_ids,
+            last_n_gw=5
+        )
+        log("  Advanced analysis plots generated successfully (league + squad + defensive)", verbose)
+    except Exception as e:
+        log(f"  Warning: Could not generate advanced analysis plots: {e}", verbose)
     
     # Generate hindsight fixture analysis
     log("Generating hindsight fixture analysis...", verbose)
@@ -441,7 +629,8 @@ def main():
                 entry_ids=competitor_ids,
                 season=season,
                 gameweek=gameweek,
-                use_cache=use_cache
+                use_cache=use_cache,
+                session_cache=session_cache
             )
             print(f"  Comparing {len(competitive_data)} teams")
 
@@ -465,7 +654,7 @@ def main():
         log("Building competitive analysis vs Top 5 Global Managers...", verbose)
         try:
             # Fetch top 5 global team entry IDs
-            top_teams = get_top_global_teams(n=5, use_cache=use_cache)
+            top_teams = get_top_global_teams(n=5, use_cache=use_cache, session_cache=session_cache)
             if top_teams:
                 top_entry_ids = [t['entry_id'] for t in top_teams]
                 # Add user's team for comparison
@@ -481,7 +670,8 @@ def main():
                     entry_ids=global_comparison_ids,
                     season=season,
                     gameweek=gameweek,
-                    use_cache=use_cache
+                    use_cache=use_cache,
+                    session_cache=session_cache
                 )
                 
                 # Generate plots for global comparison (with different filenames)
@@ -595,7 +785,8 @@ def main():
                     league_id=args.league_id,
                     sample_n=args.league_sample,
                     focus_entry_id=team_id,
-                    use_cache=use_cache
+                    use_cache=use_cache,
+                    session_cache=session_cache
                 )
                 if league_entry_ids:
                     print(f"  Sampled {len(league_entry_ids)} teams from league {args.league_id}")
@@ -620,7 +811,8 @@ def main():
                 league_ownership_data = compute_league_ownership(
                     entry_ids=league_entry_ids,
                     gw=ownership_gw,
-                    use_cache=use_cache
+                    use_cache=use_cache,
+                    session_cache=session_cache
                 )
                 sample_size = league_ownership_data.get('sample_size', 0)
                 print(f"  League ownership computed from {sample_size} teams (based on GW{ownership_gw} squads)")
@@ -635,112 +827,112 @@ def main():
             total_budget = team_value + bank
         
         print(f"  Free Hit budget: {total_budget:.1f}m")
-        print(f"  Strategy: {args.free_hit_strategy}")
+        print(f"  Primary strategy: {args.free_hit_strategy}")
         
         # Get teams and fixtures data for FDR display
         teams_data = fetcher.bootstrap_data.get('teams', [])
         fixtures_list = fetcher.fixtures_df.to_dict('records') if not fetcher.fixtures_df.empty else []
         
-        # Build optimal Free Hit squad (pass predictions for 5-GW xP)
-        fh_optimizer = FreeHitOptimizer(
-            players_df=fetcher.players_df,
-            total_budget=total_budget,
-            league_ownership=league_ownership_data,
-            strategy=args.free_hit_strategy,
-            teams_data=teams_data,
-            fixtures_data=fixtures_list,
-            current_gw=gameweek,
-            predictions=predictions
-        )
-        free_hit_team = fh_optimizer.build_squad()
-        
-        # Add target GW to the result
-        free_hit_team['target_gw'] = free_hit_gw
-        
-        # Calculate current squad 1-GW xP (sum of ep_next for current squad)
-        current_squad_1gw_xp = 0.0
+        # Get current squad STARTING XI player IDs (needed for all strategies)
+        current_xi_ids = []
         for p in squad_analysis:
-            pid = p.get('player_id')
-            player_row = fetcher.players_df[fetcher.players_df['id'] == pid]
-            if not player_row.empty:
-                ep_next = float(player_row['ep_next'].iloc[0] or 0)
-                current_squad_1gw_xp += ep_next
+            pos_in_squad = p.get('position_in_squad', 0)
+            if pos_in_squad >= 1 and pos_in_squad <= 11:  # Starting XI only
+                current_xi_ids.append(p.get('player_id'))
         
-        # Calculate optimized (Free Hit) 1-GW xP from starting XI
-        fh_1gw_xp = sum(p.get('ep_next', 0) for p in free_hit_team.get('starting_xi', []))
+        # Calculate current squad xP for the target GW (same for all strategies)
+        target_gw_offset = free_hit_gw - gameweek
+        target_gw_current_xp = 0.0
+        predictor = strategy_planner.predictor if strategy_planner else None
         
-        # Calculate per-GW xP comparison for 5 gameweeks
-        gw_comparison = {
-            'current_gw': gameweek,
-            'gameweeks': [],
-            'current_squad_xp': [],
-            'free_hit_xp': [],
-            'best_gw': None
+        if predictor and predictor.is_trained and all_player_predictions:
+            for pid in current_xi_ids:
+                if pid in all_player_predictions:
+                    preds = all_player_predictions[pid].get('predictions', [])
+                    if target_gw_offset <= len(preds) and target_gw_offset > 0:
+                        target_gw_current_xp += preds[target_gw_offset - 1]
+        
+        # Build 3 FREE HIT SQUAD PERMUTATIONS with different strategies
+        strategies = ['safe', 'balanced', 'aggressive']
+        strategy_descriptions = {
+            'safe': 'Template Squad - High ownership, minimize risk',
+            'balanced': 'Balanced Squad - Mix of template & differentials',
+            'aggressive': 'Differential Squad - Low ownership, chase upside'
         }
         
-        # Get current squad player IDs
-        current_squad_ids = [p.get('player_id') for p in squad_analysis]
-        # Get Free Hit XI player IDs
-        fh_xi_ids = [p.get('id') for p in free_hit_team.get('starting_xi', [])]
+        free_hit_permutations = []
         
-        # Use predictor uniformly for ALL gameweeks in the comparison plot
-        # This ensures a fair apples-to-apples comparison across GW17-21
-        # Note: The EV Analysis box above uses FPL's ep_next for 1-GW focus,
-        # but this plot uses our predictor for consistent multi-GW comparison
-        predictor = strategy_planner.predictor if strategy_planner else None
-        if predictor and predictor.is_trained and all_player_predictions:
-            best_gain = 0
-            for gw_offset in range(1, 6):  # Next 5 GWs
-                target_gw = gameweek + gw_offset
-                gw_comparison['gameweeks'].append(target_gw)
-                
-                # Use predictor for ALL gameweeks (uniform methodology)
-                current_gw_xp = 0.0
-                for pid in current_squad_ids:
-                    if pid in all_player_predictions:
-                        preds = all_player_predictions[pid].get('predictions', [])
-                        if gw_offset <= len(preds):
-                            current_gw_xp += preds[gw_offset - 1]
-                
-                fh_gw_xp = 0.0
+        for strat in strategies:
+            fh_optimizer = FreeHitOptimizer(
+                players_df=fetcher.players_df,
+                total_budget=total_budget,
+                league_ownership=league_ownership_data,
+                strategy=strat,
+                teams_data=teams_data,
+                fixtures_data=fixtures_list,
+                current_gw=gameweek,
+                target_gw=free_hit_gw,
+                predictions=all_player_predictions
+            )
+            squad_result = fh_optimizer.build_squad()
+            squad_result['target_gw'] = free_hit_gw
+            squad_result['strategy'] = strat
+            squad_result['strategy_description'] = strategy_descriptions[strat]
+            
+            # Calculate xP for this permutation's XI
+            fh_xi_ids = [p.get('id') for p in squad_result.get('starting_xi', [])]
+            target_gw_fh_xp = 0.0
+            
+            if predictor and predictor.is_trained and all_player_predictions:
                 for pid in fh_xi_ids:
                     if pid in all_player_predictions:
                         preds = all_player_predictions[pid].get('predictions', [])
-                        if gw_offset <= len(preds):
-                            fh_gw_xp += preds[gw_offset - 1]
-                
-                gw_comparison['current_squad_xp'].append(round(current_gw_xp, 1))
-                gw_comparison['free_hit_xp'].append(round(fh_gw_xp, 1))
-                
-                # Track best GW
-                gain = fh_gw_xp - current_gw_xp
-                if gain > best_gain:
-                    best_gain = gain
-                    gw_comparison['best_gw'] = target_gw
+                        if target_gw_offset <= len(preds) and target_gw_offset > 0:
+                            target_gw_fh_xp += preds[target_gw_offset - 1]
             
-            print(f"  Per-GW comparison generated for GW{gameweek+1}-GW{gameweek+5}")
+            # Add EV analysis
+            squad_result['ev_analysis'] = {
+                'current_squad_xp': round(target_gw_current_xp, 1),
+                'optimized_xp': round(target_gw_fh_xp, 1),
+                'potential_gain': round(target_gw_fh_xp - target_gw_current_xp, 1),
+                'horizon': f'GW{free_hit_gw}'
+            }
             
-            # Generate the Free Hit GW analysis plot
+            # Add GW comparison data
+            squad_result['gw_comparison'] = {
+                'target_gw': free_hit_gw,
+                'current_squad_xp': round(target_gw_current_xp, 1),
+                'free_hit_xp': round(target_gw_fh_xp, 1),
+            }
+            
+            free_hit_permutations.append(squad_result)
+            
+            budget_info = squad_result.get('budget', {})
+            print(f"  [{strat.upper()}] {budget_info.get('spent', 0):.1f}m spent, "
+                  f"xP: {target_gw_fh_xp:.1f}, Gain: {target_gw_fh_xp - target_gw_current_xp:+.1f}")
+        
+        # Use the primary strategy as the "main" free_hit_team for backward compatibility
+        primary_idx = strategies.index(args.free_hit_strategy)
+        free_hit_team = free_hit_permutations[primary_idx]
+        free_hit_team['all_permutations'] = free_hit_permutations
+        
+        print(f"  Single-GW analysis for target GW{free_hit_gw}")
+        
+        # Generate the Free Hit comparison plot (using primary strategy)
+        gw_comparison = free_hit_team.get('gw_comparison', {})
+        if gw_comparison:
             fh_plot_path = plot_gen.generate_free_hit_gw_comparison(gw_comparison)
             if fh_plot_path:
                 free_hit_team['gw_plot'] = fh_plot_path
                 print(f"  Free Hit analysis plot saved")
-        
-        # Add EV analysis to free_hit_team
-        free_hit_team['ev_analysis'] = {
-            'current_squad_xp': round(current_squad_1gw_xp, 1),
-            'optimized_xp': round(fh_1gw_xp, 1),
-            'potential_gain': round(fh_1gw_xp - current_squad_1gw_xp, 1),
-            'horizon': '1 GW'
-        }
-        free_hit_team['gw_comparison'] = gw_comparison
         
         budget_info = free_hit_team.get('budget', {})
         league_analysis = free_hit_team.get('league_analysis', {})
         print(f"  Free Hit squad built: {budget_info.get('spent', 0):.1f}m spent, {budget_info.get('remaining', 0):.1f}m ITB")
         print(f"  Formation: {free_hit_team.get('formation', 'N/A')}")
         print(f"  Captain: {free_hit_team.get('captain', {}).get('name', 'N/A')}")
-        print(f"  1-GW xP: {current_squad_1gw_xp:.1f} -> {fh_1gw_xp:.1f} (+{fh_1gw_xp - current_squad_1gw_xp:.1f})")
+        ev = free_hit_team.get('ev_analysis', {})
+        print(f"  GW{free_hit_gw} xP (ML): {ev.get('current_squad_xp', 0):.1f} -> {ev.get('optimized_xp', 0):.1f} (+{ev.get('potential_gain', 0):.1f})")
         print(f"  Differentials: {len(league_analysis.get('differentials', []))}")
         print(f"  Template picks: {len(league_analysis.get('template_picks', []))}")
         
@@ -750,7 +942,7 @@ def main():
 
     # Generate LaTeX report
     log("Generating LaTeX report...", verbose)
-    generator = LaTeXReportGenerator(team_id, gameweek, plot_dir=output_dir)
+    generator = LaTeXReportGenerator(team_id, gameweek, plot_dir=output_dir, session_cache=session_cache)
 
     # Add position_in_squad to squad for formation diagram
     for player in squad:
@@ -784,6 +976,13 @@ def main():
         f.write(latex_content)
 
     print(f"\n[SUCCESS] LaTeX report saved to: {output_path}")
+    
+    # Save session cache to disk
+    if session_cache is not None:
+        log("Saving session cache...", verbose)
+        session_cache.save()
+        stats = session_cache.get_stats()
+        print(f"[INFO] Session cache saved: {stats['entries_in_memory']} entries, {stats['session_size_mb']:.2f} MB")
 
     # Compile to PDF if requested
     if not args.no_pdf:

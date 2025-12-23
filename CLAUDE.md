@@ -19,11 +19,11 @@ bash scripts/pip install -r requirements.txt
 # Install dependencies
 python -m pip install -r requirements.txt
 
-# Generate report (preferred entrypoint - now at project root)
+# Generate report (preferred entrypoint)
 ./run_report.sh <TEAM_ID> [GAMEWEEK]
-# Example: ./run_report.sh 847569 16
+# Example: ./run_report.sh 847569 17
 
-# Generate LaTeX only (no PDF) - now at project root
+# Generate LaTeX only (no PDF)
 python generate_fpl_report.py --team <TEAM_ID> --gw <N> --no-pdf
 
 # Run unit tests
@@ -33,10 +33,10 @@ python -m unittest discover -s tests -v
 python -m unittest tests.test_report_enhancements -v
 
 # Refresh current-season data from FPL API
-python global_scraper.py
+python -m scraping.global_scraper
 
 # Merge multi-season datasets
-python global_merger.py
+python -m processing.global_merger
 
 # Full pipeline with model training
 python main.py --update-data --train-models --team <TEAM_ID>
@@ -48,7 +48,7 @@ python main.py --update-data --train-models --team <TEAM_ID>
 - **FPL API integration**: `scraping/fpl_api.py` (primary) or `etl/fetchers.py` (modern ETL)
 - **Data consolidation**: `reports/fpl_report/data_fetcher.py` wraps API calls with enrichment
 - **Caching**: `reports/fpl_report/cache_manager.py` - persistent caching with TTLs (bootstrap: 3600s, team_data: 300s)
-- **Storage**: Parquet files in `data/parquet/`, CSVs in `data/<season>/`
+- **Storage**: Parquet files in `data/parquet/`, CSVs in `data/<season>/` (not tracked in git)
 
 ### Layer 2: Predictive Modeling
 - **Feature engineering**: `models/feature_engineering.py` - rolling form, ICT, xG/xA, team strength
@@ -80,7 +80,7 @@ FPL API → FPLDataFetcher → PlayerAnalyzer + FPLPointsPredictor
 | `solver/` | MIP optimizer using sasoptpy + HiGHS |
 | `reports/` | Report generation pipeline and output files |
 | `reports/fpl_report/` | Core analysis modules (data_fetcher, predictor, transfer_recommender, etc.) |
-| `data/<season>/` | Historical + current season data (gws/, players/, CSVs) |
+| `data/<season>/` | Historical + current season data - not tracked in git |
 | `tests/` | Unit tests using unittest framework |
 
 ## Configuration
@@ -103,7 +103,7 @@ CLI args override config values.
 
 ## Import Paths
 
-The codebase has been reorganized. Use these import patterns:
+Use these import patterns:
 
 ```python
 # Scraping / FPL API
@@ -130,12 +130,6 @@ from models.inference import FPLInferencePipeline
 
 # Solver
 from solver.optimizer import TransferMIPSolver
-```
-
-Legacy imports (deprecated but still work for backward compatibility):
-```python
-from getters import get_data  # Use scraping.fpl_api instead
-from parsers import parse_players  # Use processing.parsers instead
 ```
 
 ## Data Contracts

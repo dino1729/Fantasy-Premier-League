@@ -4,9 +4,11 @@ import unittest
 from unittest.mock import patch, MagicMock
 import tempfile
 import shutil
+import json
 from typing import List, Dict
 
 import pandas as pd
+import numpy as np
 
 
 # Add repo root to path for imports
@@ -19,6 +21,8 @@ from reports.fpl_report.data_fetcher import FPLDataFetcher, build_competitive_da
 from reports.fpl_report.transfer_recommender import TransferRecommender
 from reports.fpl_report.plot_generator import PlotGenerator
 from reports.fpl_report.latex_generator import LaTeXReportGenerator
+from reports.fpl_report.session_cache import SessionCacheManager
+from reports.fpl_report.cache_manager import CacheManager
 
 
 class DummyAnalyzer:
@@ -29,6 +33,16 @@ class DummyFetcher:
     def __init__(self, df: pd.DataFrame):
         self._df = df
         self.players_df = df
+        # Create empty fixtures DataFrame with expected columns
+        self.fixtures_df = pd.DataFrame(columns=[
+            'id', 'event', 'team_h', 'team_a', 'team_h_difficulty', 'team_a_difficulty',
+            'team_h_score', 'team_a_score', 'finished'
+        ])
+        self.bootstrap_data = {
+            'teams': [{'id': 1, 'short_name': 'LIV'}, {'id': 2, 'short_name': 'TOT'}],
+            'events': [{'id': 10, 'is_current': True, 'finished': False}],
+            'elements': []
+        }
 
     def get_bank(self) -> float:
         return 0.0
@@ -53,6 +67,446 @@ class DummyFetcher:
 
     def get_player_stats(self, player_id: int):
         return {}
+
+
+class TestUsageOutputPlots(unittest.TestCase):
+    """Tests for usage vs output plots."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.plot_gen = PlotGenerator(self.temp_dir)
+
+        # Minimal season data with position info
+        self.fpl_core_season_data = {
+            'playerstats': pd.DataFrame([
+                {'id': 1, 'web_name': 'Alpha', 'first_name': 'A', 'second_name': 'One'}
+            ]),
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Midfielder'}
+            ])
+        }
+
+        # Three gameweeks of playermatchstats for a single player
+        self.all_gw_data = {
+            1: {'playermatchstats': pd.DataFrame([
+                {'player_id': 1, 'minutes_played': 30, 'goals': 0, 'assists': 0,
+                 'total_shots': 1, 'touches_opposition_box': 1, 'xg': 0.1, 'xa': 0.1}
+            ])},
+            2: {'playermatchstats': pd.DataFrame([
+                {'player_id': 1, 'minutes_played': 90, 'goals': 1, 'assists': 0,
+                 'total_shots': 3, 'touches_opposition_box': 3, 'xg': 0.4, 'xa': 0.2}
+            ])},
+            3: {'playermatchstats': pd.DataFrame([
+                {'player_id': 1, 'minutes_played': 60, 'goals': 0, 'assists': 1,
+                 'total_shots': 2, 'touches_opposition_box': 2, 'xg': 0.2, 'xa': 0.3}
+            ])},
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_usage_aggregate_respects_last_n_gw(self):
+        """Aggregated stats should only include the last N gameweeks when requested."""
+        agg = self.plot_gen._aggregate_fplcore_usage_stats(
+            self.all_gw_data,
+            self.fpl_core_season_data,
+            min_minutes=0,
+            last_n_gw=2
+        )
+
+        minutes_played = agg.loc[agg['player_id'] == 1, 'minutes_played'].iloc[0]
+        # Should only include GW2 and GW3 (90 + 60)
+        self.assertEqual(minutes_played, 150)
+
+    def test_generate_usage_output_recent_creates_file(self):
+        """Recent window plot should save an image for the requested GW range."""
+        filename = self.plot_gen.generate_usage_output_scatter_recent(
+            self.all_gw_data,
+            self.fpl_core_season_data,
+            squad_ids=[1],
+            last_n_gw=2,
+            top_n=5
+        )
+
+        expected_path = self.temp_dir / 'usage_output_scatter_last2.png'
+        self.assertEqual(filename, 'usage_output_scatter_last2.png')
+        self.assertTrue(expected_path.exists(), f"Expected plot file at {expected_path}")
+
+
+class TestSingleBundledCache(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.plot_gen = PlotGenerator(self.temp_dir)
+        self.cache_dir = self.temp_dir / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _touch(self, path: Path, data: bytes = b"data"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def test_session_cache_single_file_overwrites_and_cleans_legacy(self):
+        # Simulate legacy CacheManager artifacts (md5 files + metadata)
+        self._touch(self.cache_dir / "092bd25244a60c32ad274ed2e85aeb5b.pkl")
+        self._touch(self.cache_dir / "fcfad1130d8b81cfb9a028cb02fa8ea1.pkl")
+        (self.cache_dir / "cache_metadata.json").write_text("{}", encoding="utf-8")
+
+        # Simulate older session cache artifacts
+        self._touch(self.cache_dir / "session_847569_gw17_20251222.pkl")
+        (self.cache_dir / "session_metadata.json").write_text("{}", encoding="utf-8")
+
+        cache = SessionCacheManager(
+            team_id=847569,
+            gameweek=17,
+            cache_dir=self.cache_dir,
+            ttl=3600,
+            max_sessions=10,
+            enabled=True,
+            single_file=True,
+        )
+        cache.set("bootstrap", {"ok": True})
+        cache.save()
+
+        pkl_files = sorted(p.name for p in self.cache_dir.glob("*.pkl"))
+        self.assertEqual(
+            pkl_files,
+            ["session_cache.pkl"],
+            f"Expected only one bundled cache file, got: {pkl_files}",
+        )
+
+        self.assertFalse(
+            (self.cache_dir / "cache_metadata.json").exists(),
+            "Legacy cache_metadata.json should be removed in single-file mode",
+        )
+        self.assertFalse(
+            (self.cache_dir / "session_metadata.json").exists(),
+            "session_metadata.json should not exist in single-file mode",
+        )
+
+    def test_cache_manager_default_is_single_file_bundle(self):
+        # Simulate legacy CacheManager artifacts (md5 files + metadata) that should not grow further
+        self._touch(self.cache_dir / "092bd25244a60c32ad274ed2e85aeb5b.pkl")
+        (self.cache_dir / "cache_metadata.json").write_text("{}", encoding="utf-8")
+
+        cache = CacheManager(cache_dir=self.cache_dir, enabled=True)
+        cache.set("bootstrap", {"a": 1})
+        cache.set("team_data", {"b": 2}, 123)
+
+        pkl_files = sorted(p.name for p in self.cache_dir.glob("*.pkl"))
+        self.assertEqual(
+            pkl_files,
+            ["cache_bundle.pkl"],
+            f"CacheManager should write a single bundle file, got: {pkl_files}",
+        )
+        self.assertFalse(
+            (self.cache_dir / "cache_metadata.json").exists(),
+            "CacheManager should not write cache_metadata.json in bundled mode",
+        )
+
+    def test_select_gameweeks_ignores_future_fixture_only_entries(self):
+        """_select_gameweeks should ignore future GWs that only contain fixtures/teams."""
+        # Historical GWs with playermatchstats
+        all_gw_data = {
+            gw: {
+                'playermatchstats': pd.DataFrame([{'player_id': 1, 'minutes_played': 90}])
+            }
+            for gw in range(1, 6)
+        }
+        # Future GW with only fixtures/teams (no match stats)
+        all_gw_data[6] = {
+            'fixtures': pd.DataFrame([{'gameweek': 6, 'home_team': 1, 'away_team': 2}]),
+            'teams': pd.DataFrame([{'id': 1}, {'id': 2}]),
+            'playermatchstats': pd.DataFrame()  # explicitly empty
+        }
+
+        selected = self.plot_gen._select_gameweeks(all_gw_data, last_n_gw=5)
+        self.assertEqual(selected, [1, 2, 3, 4, 5], "Fixture-only future GW should be excluded")
+
+        range_label = self.plot_gen._format_gw_range_label(selected)
+        self.assertEqual(range_label, "GW1-5", "Range label should reflect only historical GWs")
+
+
+class TestGoalkeeperValuePlots(unittest.TestCase):
+    """Tests for goalkeeper scatter plots (goals prevented vs points)."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.plot_gen = PlotGenerator(self.temp_dir)
+
+        # Minimal season data with player identity + position
+        self.fpl_core_season_data = {
+            "playerstats": pd.DataFrame(
+                [
+                    {"id": 1, "web_name": "AlphaGK", "first_name": "Alpha", "second_name": "GK", "gw": 5},
+                    {"id": 2, "web_name": "BetaGK", "first_name": "Beta", "second_name": "GK", "gw": 5},
+                    {"id": 3, "web_name": "GammaDEF", "first_name": "Gamma", "second_name": "DEF", "gw": 5},
+                ]
+            ),
+            "players": pd.DataFrame(
+                [
+                    {"player_id": 1, "position": "Goalkeeper"},
+                    {"player_id": 2, "position": "Goalkeeper"},
+                    {"player_id": 3, "position": "Defender"},
+                ]
+            ),
+        }
+
+        # Build 5 GWs so default season min_minutes=450 passes for the GKs.
+        self.all_gw_data = {}
+        for gw in range(1, 6):
+            self.all_gw_data[gw] = {
+                "playermatchstats": pd.DataFrame(
+                    [
+                        # GK1: decent shot stopping
+                        {
+                            "player_id": 1,
+                            "minutes_played": 90,
+                            "saves": 4,
+                            "goals_conceded": 1,
+                            "xgot_faced": 1.6,
+                            "goals_prevented": 0.6,
+                        },
+                        # GK2: weaker shot stopping
+                        {
+                            "player_id": 2,
+                            "minutes_played": 90,
+                            "saves": 2,
+                            "goals_conceded": 2,
+                            "xgot_faced": 2.1,
+                            "goals_prevented": 0.1,
+                        },
+                        # Non-GK noise row
+                        {
+                            "player_id": 3,
+                            "minutes_played": 90,
+                            "saves": 0,
+                            "goals_conceded": 0,
+                            "xgot_faced": 0.0,
+                            "goals_prevented": 0.0,
+                        },
+                    ]
+                ),
+                "player_gameweek_stats": pd.DataFrame(
+                    [
+                        {"id": 1, "event_points": 6, "clean_sheets": 1 if gw % 2 == 0 else 0},
+                        {"id": 2, "event_points": 2, "clean_sheets": 0},
+                        {"id": 3, "event_points": 5, "clean_sheets": 1},
+                    ]
+                ),
+            }
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_generate_goalkeeper_value_scatter_creates_file(self):
+        filename = self.plot_gen.generate_goalkeeper_value_scatter(
+            all_gw_data=self.all_gw_data,
+            fpl_core_season_data=self.fpl_core_season_data,
+            squad_ids=[1],
+            top_n=20,
+        )
+
+        expected_path = self.temp_dir / "goalkeeper_value_scatter.png"
+        self.assertEqual(filename, "goalkeeper_value_scatter.png")
+        self.assertTrue(expected_path.exists(), f"Expected plot file at {expected_path}")
+
+    def test_generate_goalkeeper_value_scatter_recent_creates_file(self):
+        filename = self.plot_gen.generate_goalkeeper_value_scatter_recent(
+            all_gw_data=self.all_gw_data,
+            fpl_core_season_data=self.fpl_core_season_data,
+            squad_ids=[1],
+            last_n_gw=5,
+            top_n=20,
+        )
+
+        expected_path = self.temp_dir / "goalkeeper_value_scatter_last5.png"
+        self.assertEqual(filename, "goalkeeper_value_scatter_last5.png")
+        self.assertTrue(expected_path.exists(), f"Expected plot file at {expected_path}")
+
+
+class TestUsageOutputQuadrantTablesLatex(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_quadrant_tables_are_resized_to_minipage_width(self):
+        """Quadrant tables should be constrained to the minipage width to avoid overlap."""
+        summary = {
+            "season": {
+                "range_label": "GW1-17",
+                "categories": {
+                    "elite": [
+                        {"name": "Calvert-Lewin", "pos": "FWD", "usage_per_90": 9.82, "ga": 4, "xgi": 2.95, "pts": 32},
+                        {"name": "B.Fernandes", "pos": "MID", "usage_per_90": 5.48, "ga": 12, "xgi": 11.08, "pts": 98},
+                    ],
+                    "volume": [
+                        {"name": "Igor Jesus", "pos": "FWD", "usage_per_90": 9.81, "ga": 7, "xgi": 7.54, "pts": 31},
+                    ],
+                    "clinical": [
+                        {"name": "Szoboszlai", "pos": "MID", "usage_per_90": 4.38, "ga": 9, "xgi": 8.24, "pts": 62},
+                    ],
+                },
+            },
+            "last5": {
+                "range_label": "GW12-17",
+                "categories": {
+                    "elite": [
+                        {"name": "Haaland", "pos": "FWD", "usage_per_90": 10.15, "ga": 6, "xgi": 6.19, "pts": 33},
+                    ],
+                    "volume": [
+                        {"name": "M.Salah", "pos": "MID", "usage_per_90": 14.64, "ga": 1, "xgi": 2.80, "pts": 10},
+                    ],
+                    "clinical": [
+                        {"name": "Hudson-Odoi", "pos": "MID", "usage_per_90": 7.23, "ga": 3, "xgi": 2.66, "pts": 23},
+                    ],
+                },
+            },
+        }
+
+        (self.temp_dir / "usage_output_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+        gen = LaTeXReportGenerator(team_id=1, gameweek=17, plot_dir=self.temp_dir)
+        latex = gen._generate_advanced_finishing_creativity_section()
+
+        start_marker = r"\subsubsection{Usage vs Output Quadrants (Tables)}"
+        end_marker = r"\subsection{Defensive Value Charts}"
+
+        self.assertIn(start_marker, latex)
+        start = latex.index(start_marker)
+        self.assertIn(end_marker, latex[start:])
+        end = latex.index(end_marker, start)
+        section = latex[start:end]
+
+        # 3 tables for "season" + 3 tables for "last5" = 6 total, each must be width constrained.
+        self.assertEqual(section.count(r"\resizebox{\linewidth}{!}"), 6)
+
+
+class TestDefensiveValueQuadrantTablesLatex(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_defensive_quadrant_tables_are_resized_to_minipage_width(self):
+        """Defensive quadrant tables should be constrained to the minipage width to avoid overlap."""
+        summary = {
+            "season": {
+                "range_label": "GW1-17",
+                "categories": {
+                    "elite": [
+                        {"name": "Van-Hecke", "def_per_90": 11.2, "cs": 5, "cs_pct": 33.3, "pts": 72},
+                    ],
+                    "volume": [
+                        {"name": "Wan-Bissaka", "def_per_90": 6.6, "cs": 0, "cs_pct": 0.0, "pts": 73},
+                    ],
+                    "cs_merchants": [
+                        {"name": "Calafiori", "def_per_90": 3.7, "cs": 8, "cs_pct": 53.3, "pts": 71},
+                    ],
+                },
+            },
+            "last5": {
+                "range_label": "GW12-17",
+                "categories": {
+                    "elite": [
+                        {"name": "Tarkowski", "def_per_90": 10.4, "cs": 3, "cs_pct": 60.0, "pts": 31},
+                    ],
+                    "volume": [
+                        {"name": "Konaté", "def_per_90": 9.1, "cs": 2, "cs_pct": 33.3, "pts": 11},
+                    ],
+                    "cs_merchants": [
+                        {"name": "Chalobah", "def_per_90": 8.2, "cs": 3, "cs_pct": 50.0, "pts": 36},
+                    ],
+                },
+            },
+        }
+
+        (self.temp_dir / "defensive_value_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+        gen = LaTeXReportGenerator(team_id=1, gameweek=17, plot_dir=self.temp_dir)
+        latex = gen._generate_advanced_finishing_creativity_section()
+
+        start_marker = r"\subsubsection{Defensive Value Quadrants (Tables)}"
+        self.assertIn(start_marker, latex)
+
+        section = latex[latex.index(start_marker):]
+
+        # 3 tables for "season" + 3 tables for "last5" = 6 total, each must be width constrained.
+        self.assertEqual(section.count(r"\resizebox{\linewidth}{!}"), 6)
+
+
+class TestGoalkeeperValueTablesLatex(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_goalkeeper_tables_render_when_summary_available(self):
+        summary = {
+            "season": {
+                "range_label": "GW1-17",
+                "rows": [
+                    {"name": "Sánchez", "gp": 2.31, "save_pct": 76.4, "cs": 6, "pts": 110},
+                    {"name": "Pickford", "gp": 1.12, "save_pct": 71.0, "cs": 5, "pts": 98},
+                ],
+                "categories": {
+                    "elite": [
+                        {"name": "Sánchez", "gp": 2.31, "save_pct": 76.4, "cs": 6, "pts": 110},
+                    ],
+                    "protected": [
+                        {"name": "Raya", "gp": -0.55, "save_pct": 73.2, "cs": 7, "pts": 105},
+                    ],
+                    "unlucky": [
+                        {"name": "Donnarumma", "gp": 0.88, "save_pct": 66.7, "cs": 2, "pts": 60},
+                    ],
+                    "avoid": [
+                        {"name": "Johnstone", "gp": -1.21, "save_pct": 58.0, "cs": 1, "pts": 40},
+                    ],
+                },
+            },
+            "last5": {
+                "range_label": "GW12-17",
+                "rows": [
+                    {"name": "Sánchez", "gp": 1.70, "save_pct": 78.1, "cs": 2, "pts": 26},
+                    {"name": "Verbruggen", "gp": 1.05, "save_pct": 70.0, "cs": 1, "pts": 19},
+                ],
+                "categories": {
+                    "elite": [
+                        {"name": "Sánchez", "gp": 1.70, "save_pct": 78.1, "cs": 2, "pts": 26},
+                    ],
+                    "protected": [
+                        {"name": "Areola", "gp": -0.20, "save_pct": 75.0, "cs": 2, "pts": 22},
+                    ],
+                    "unlucky": [
+                        {"name": "Pickford", "gp": 0.40, "save_pct": 68.0, "cs": 0, "pts": 11},
+                    ],
+                    "avoid": [
+                        {"name": "Ramsdale", "gp": -0.90, "save_pct": 60.0, "cs": 0, "pts": 7},
+                    ],
+                },
+            },
+        }
+
+        (self.temp_dir / "goalkeeper_value_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+        gen = LaTeXReportGenerator(team_id=1, gameweek=17, plot_dir=self.temp_dir)
+        latex = gen._generate_advanced_finishing_creativity_section()
+
+        start_marker = r"\subsection{Goalkeeper Shot-Stopping Charts}"
+        self.assertIn(start_marker, latex)
+
+        section = latex[latex.index(start_marker):]
+        self.assertIn(r"\subsubsection{Top Goalkeepers Tables}", section)
+        self.assertIn(r"\subsubsection{Goalkeeper Shot-Stopping Quadrants (Tables)}", section)
+
+        # 2 top tables (season + last5) + 6 quadrant tables (3 per window) = 8 total.
+        self.assertEqual(section.count(r"\resizebox{\linewidth}{!}"), 8)
 
 
 class TestReportEnhancements(unittest.TestCase):
@@ -83,7 +537,7 @@ class TestReportEnhancements(unittest.TestCase):
             }
         ]
 
-        with patch("fpl_report.data_fetcher.get_entry_transfers_data", return_value=raw_transfers):
+        with patch("reports.fpl_report.data_fetcher.get_entry_transfers_data", return_value=raw_transfers):
             transfers = fetcher.get_transfers()
 
         self.assertEqual(len(transfers), 1)
@@ -202,10 +656,10 @@ class TestCompetitiveDatasetBuilder(unittest.TestCase):
             ]
         }
 
-    @patch('fpl_report.data_fetcher.get_entry_data')
-    @patch('fpl_report.data_fetcher.get_entry_personal_data')
-    @patch('fpl_report.data_fetcher.get_entry_gws_data')
-    @patch('fpl_report.data_fetcher.get_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_personal_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_gws_data')
+    @patch('reports.fpl_report.data_fetcher.get_data')
     def test_build_competitive_dataset_returns_correct_structure(
         self, mock_get_data, mock_gws, mock_personal, mock_entry
     ):
@@ -220,7 +674,7 @@ class TestCompetitiveDatasetBuilder(unittest.TestCase):
             'elements': [
                 {'id': i, 'web_name': f'Player{i}', 'first_name': 'First',
                  'second_name': f'Last{i}', 'team': 1, 'element_type': (i % 4) + 1}
-                for i in range(1, 16)
+                for i in range(1, 17)
             ]
         }
         mock_entry.side_effect = lambda eid: self._make_mock_entry_data(eid)
@@ -248,10 +702,10 @@ class TestCompetitiveDatasetBuilder(unittest.TestCase):
         self.assertIsInstance(first_entry['squad'], list)
         self.assertEqual(len(first_entry['squad']), 15)
 
-    @patch('fpl_report.data_fetcher.get_entry_data')
-    @patch('fpl_report.data_fetcher.get_entry_personal_data')
-    @patch('fpl_report.data_fetcher.get_entry_gws_data')
-    @patch('fpl_report.data_fetcher.get_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_personal_data')
+    @patch('reports.fpl_report.data_fetcher.get_entry_gws_data')
+    @patch('reports.fpl_report.data_fetcher.get_data')
     def test_build_competitive_dataset_computes_total_hits(
         self, mock_get_data, mock_gws, mock_personal, mock_entry
     ):
@@ -264,7 +718,7 @@ class TestCompetitiveDatasetBuilder(unittest.TestCase):
             'elements': [
                 {'id': i, 'web_name': f'Player{i}', 'first_name': 'First',
                  'second_name': f'Last{i}', 'team': 1, 'element_type': 1}
-                for i in range(1, 16)
+                for i in range(1, 17)
             ]
         }
         mock_entry.return_value = self._make_mock_entry_data(21023)
@@ -352,28 +806,65 @@ class TestCompetitivePlots(unittest.TestCase):
         """Test that player contribution treemaps are created for each team."""
         plot_gen = PlotGenerator(self.temp_dir)
 
+        # Build proper season_history structure required by generate_competitive_treemaps
+        # Each GW entry needs 'squad' (not 'picks') with player info
+        # _calculate_contributing_points expects:
+        # - squad[i].position_in_squad (1-11 = starting XI)
+        # - squad[i].name
+        # - squad[i].stats.event_points (points for that GW)
+        # - squad[i].multiplier (captain multiplier)
+        # - squad[i].position
+        def make_season_history(players):
+            """Create season_history with proper structure for treemap generation."""
+            history = []
+            for gw in range(1, 4):  # 3 gameweeks
+                squad = []
+                for i, p in enumerate(players, start=1):
+                    event_pts = p['stats']['total_points'] // 3  # Points per GW
+                    squad.append({
+                        'element': i,  # player_id
+                        'name': p['name'],
+                        'position': p['position'],
+                        'position_in_squad': i,  # 1-11 = starting XI
+                        'is_captain': (i == 1),  # First player is captain
+                        'stats': {'event_points': event_pts},
+                        'multiplier': 2 if i == 1 else 1  # Captain gets 2x
+                    })
+                history.append({
+                    'gameweek': gw,
+                    'points': sum(p['stats']['event_points'] * p['multiplier'] for p in squad if p['position_in_squad'] <= 11),
+                    'total_points': gw * 50,
+                    'squad': squad  # Key must be 'squad', not 'picks'
+                })
+            return history
+
+        team_a_players = [
+            {'name': 'Salah', 'position': 'MID', 'stats': {'total_points': 120}},
+            {'name': 'Haaland', 'position': 'FWD', 'stats': {'total_points': 150}},
+            {'name': 'Saka', 'position': 'MID', 'stats': {'total_points': 90}},
+            {'name': 'Raya', 'position': 'GKP', 'stats': {'total_points': 60}},
+            {'name': 'Gabriel', 'position': 'DEF', 'stats': {'total_points': 80}},
+        ]
+        team_b_players = [
+            {'name': 'Son', 'position': 'MID', 'stats': {'total_points': 100}},
+            {'name': 'Watkins', 'position': 'FWD', 'stats': {'total_points': 110}},
+            {'name': 'Palmer', 'position': 'MID', 'stats': {'total_points': 130}},
+            {'name': 'Pickford', 'position': 'GKP', 'stats': {'total_points': 55}},
+            {'name': 'VVD', 'position': 'DEF', 'stats': {'total_points': 85}},
+        ]
+
         competitive_data = [
             {
                 'entry_id': 21023,
                 'team_info': {'team_name': 'Team A', 'manager_name': 'Manager A', 'overall_points': 500},
-                'squad': [
-                    {'name': 'Salah', 'position': 'MID', 'stats': {'total_points': 120}},
-                    {'name': 'Haaland', 'position': 'FWD', 'stats': {'total_points': 150}},
-                    {'name': 'Saka', 'position': 'MID', 'stats': {'total_points': 90}},
-                    {'name': 'Raya', 'position': 'GKP', 'stats': {'total_points': 60}},
-                    {'name': 'Gabriel', 'position': 'DEF', 'stats': {'total_points': 80}},
-                ]
+                'squad': team_a_players,
+                'season_history': make_season_history(team_a_players)
             },
             {
                 'entry_id': 6696002,
                 'team_info': {'team_name': 'Team B', 'manager_name': 'Manager B', 'overall_points': 480},
-                'squad': [
-                    {'name': 'Son', 'position': 'MID', 'stats': {'total_points': 100}},
-                    {'name': 'Watkins', 'position': 'FWD', 'stats': {'total_points': 110}},
-                    {'name': 'Palmer', 'position': 'MID', 'stats': {'total_points': 130}},
-                    {'name': 'Pickford', 'position': 'GKP', 'stats': {'total_points': 55}},
-                    {'name': 'VVD', 'position': 'DEF', 'stats': {'total_points': 85}},
-                ]
+                'squad': team_b_players,
+                'season_history': make_season_history(team_b_players)
             }
         ]
 
@@ -394,7 +885,7 @@ class TestCompetitiveLaTeXSection(unittest.TestCase):
 
     def setUp(self):
         """Set up LaTeX generator."""
-        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=16)
+        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=17)
 
     def test_generate_competitive_analysis_contains_section_header(self):
         """Test that competitive section contains correct LaTeX section header."""
@@ -613,7 +1104,7 @@ class TestWildcardOptimizer(unittest.TestCase):
 
     def test_wildcard_optimizer_respects_budget(self):
         """Test that optimizer does not exceed total budget."""
-        from fpl_report.transfer_strategy import WildcardOptimizer
+        from reports.fpl_report.transfer_strategy import WildcardOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0  # 100m budget
@@ -628,7 +1119,7 @@ class TestWildcardOptimizer(unittest.TestCase):
 
     def test_wildcard_optimizer_respects_position_quotas(self):
         """Test that optimizer selects exactly 2 GKP, 5 DEF, 5 MID, 3 FWD."""
-        from fpl_report.transfer_strategy import WildcardOptimizer
+        from reports.fpl_report.transfer_strategy import WildcardOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -650,7 +1141,7 @@ class TestWildcardOptimizer(unittest.TestCase):
 
     def test_wildcard_optimizer_respects_max_3_per_team(self):
         """Test that optimizer selects at most 3 players from any single team."""
-        from fpl_report.transfer_strategy import WildcardOptimizer
+        from reports.fpl_report.transfer_strategy import WildcardOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -669,7 +1160,7 @@ class TestWildcardOptimizer(unittest.TestCase):
 
     def test_wildcard_optimizer_excludes_injured_players(self):
         """Test that optimizer excludes players with status != 'a' or low chance."""
-        from fpl_report.transfer_strategy import WildcardOptimizer
+        from reports.fpl_report.transfer_strategy import WildcardOptimizer
 
         players_df = self._make_mock_players_df()
         # Mark one high-value player as injured
@@ -687,7 +1178,7 @@ class TestWildcardOptimizer(unittest.TestCase):
 
     def test_wildcard_optimizer_provides_starting_xi(self):
         """Test that optimizer provides a valid starting XI with formation."""
-        from fpl_report.transfer_strategy import WildcardOptimizer
+        from reports.fpl_report.transfer_strategy import WildcardOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -712,7 +1203,7 @@ class TestWildcardLaTeXSection(unittest.TestCase):
 
     def setUp(self):
         """Set up LaTeX generator."""
-        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=16)
+        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=17)
 
     def test_generate_wildcard_team_section_contains_header(self):
         """Test that wildcard section contains correct LaTeX section header."""
@@ -862,7 +1353,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_respects_budget(self):
         """Test that optimizer does not exceed total budget."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0  # 100m budget
@@ -877,7 +1368,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_respects_position_quotas(self):
         """Test that optimizer selects exactly 2 GKP, 5 DEF, 5 MID, 3 FWD."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -899,7 +1390,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_respects_max_3_per_team(self):
         """Test that optimizer selects at most 3 players from any single team."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -918,7 +1409,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_excludes_injured_players(self):
         """Test that optimizer excludes players with status != 'a' or low chance."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         # Mark one high-value player as injured
@@ -936,7 +1427,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_provides_starting_xi(self):
         """Test that optimizer provides a valid starting XI with formation."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -957,7 +1448,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_includes_ep_next(self):
         """Test that optimizer output includes ep_next for each player."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -971,7 +1462,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_with_league_ownership(self):
         """Test that optimizer uses league ownership data when provided."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -1001,7 +1492,7 @@ class TestFreeHitOptimizer(unittest.TestCase):
 
     def test_free_hit_optimizer_identifies_differentials(self):
         """Test that optimizer identifies low-ownership differentials."""
-        from fpl_report.transfer_strategy import FreeHitOptimizer
+        from reports.fpl_report.transfer_strategy import FreeHitOptimizer
 
         players_df = self._make_mock_players_df()
         total_budget = 100.0
@@ -1036,7 +1527,7 @@ class TestFreeHitLaTeXSection(unittest.TestCase):
 
     def setUp(self):
         """Set up LaTeX generator."""
-        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=16)
+        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=17)
 
     def test_generate_free_hit_team_section_contains_header(self):
         """Test that Free Hit section contains correct LaTeX section header."""
@@ -1111,8 +1602,8 @@ class TestFreeHitLaTeXSection(unittest.TestCase):
 
         latex = self.generator.generate_free_hit_team_section(free_hit_team)
 
-        # Should include league ownership header
-        self.assertIn('LeagueOwn', latex)
+        # Should include league ownership header (column header is "Own%")
+        self.assertIn('Own', latex)
 
     def test_compile_report_includes_free_hit_section_when_provided(self):
         """Test that compile_report includes Free Hit section when data is provided."""
@@ -1205,7 +1696,7 @@ class TestTransferMIPSolver(unittest.TestCase):
         for i, (name, team, cost) in enumerate([
             ('FWD_A', 11, 100), ('FWD_B', 12, 80),
             ('FWD_C', 13, 70), ('FWD_D', 14, 55),
-            ('FWD_E', 15, 45), ('FWD_F', 16, 45)
+            ('FWD_E', 15, 45), ('FWD_F', 17, 45)
         ], start=50):
             players.append({
                 'id': i, 'web_name': name, 'team': team, 'element_type': 4,
@@ -1267,7 +1758,7 @@ class TestTransferMIPSolver(unittest.TestCase):
 
     def test_mip_solver_unavailable_returns_status(self):
         """Test that solver returns 'unavailable' status if dependencies missing."""
-        from fpl_report.transfer_strategy import TransferMIPSolver, MIP_AVAILABLE
+        from reports.fpl_report.transfer_strategy import TransferMIPSolver, MIP_AVAILABLE
         
         if MIP_AVAILABLE:
             # Skip this test if MIP is actually available
@@ -1291,7 +1782,7 @@ class TestTransferMIPSolver(unittest.TestCase):
 
     def test_mip_solver_result_schema_is_stable(self):
         """Test that MIPSolverResult has all expected fields."""
-        from fpl_report.transfer_strategy import MIPSolverResult
+        from reports.fpl_report.transfer_strategy import MIPSolverResult
         
         result = MIPSolverResult(status='test')
         
@@ -1312,7 +1803,7 @@ class TestTransferMIPSolver(unittest.TestCase):
 
     def test_mip_solver_builds_candidate_pool(self):
         """Test that solver builds candidate pool correctly."""
-        from fpl_report.transfer_strategy import TransferMIPSolver, MIP_AVAILABLE
+        from reports.fpl_report.transfer_strategy import TransferMIPSolver, MIP_AVAILABLE
         
         players_df = self._make_mock_players_df()
         current_squad = self._make_mock_current_squad()
@@ -1349,7 +1840,7 @@ class TestTransferMIPSolver(unittest.TestCase):
     @unittest.skipIf(not True, "MIP solver test - may skip if dependencies unavailable")
     def test_mip_solver_respects_position_quotas_in_candidates(self):
         """Test that candidate pool includes players from all positions."""
-        from fpl_report.transfer_strategy import TransferMIPSolver
+        from reports.fpl_report.transfer_strategy import TransferMIPSolver
         
         players_df = self._make_mock_players_df()
         current_squad = self._make_mock_current_squad()
@@ -1373,7 +1864,7 @@ class TestTransferMIPSolver(unittest.TestCase):
 
     def test_mip_solver_tracks_current_squad_correctly(self):
         """Test that solver correctly identifies current squad players."""
-        from fpl_report.transfer_strategy import TransferMIPSolver
+        from reports.fpl_report.transfer_strategy import TransferMIPSolver
         
         players_df = self._make_mock_players_df()
         current_squad = self._make_mock_current_squad()
@@ -1401,7 +1892,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
 
     def test_build_transfer_timeline_from_result(self):
         """Test building timeline from solver result."""
-        from fpl_report.transfer_strategy import (
+        from reports.fpl_report.transfer_strategy import (
             MIPSolverResult, build_transfer_timeline
         )
         
@@ -1424,12 +1915,12 @@ class TestMultiPeriodPlanning(unittest.TestCase):
         self.assertEqual(timeline['status'], 'optimal')
         self.assertEqual(timeline['current_gw'], 15)
         self.assertEqual(len(timeline['weeks']), 5)
-        self.assertEqual(timeline['weeks'][0]['gameweek'], 16)
+        self.assertEqual(timeline['weeks'][0]['gameweek'], 17)
         self.assertEqual(timeline['total_expected_points'], 45.5)
 
     def test_build_transfer_timeline_handles_non_optimal(self):
         """Test timeline building with non-optimal result."""
-        from fpl_report.transfer_strategy import (
+        from reports.fpl_report.transfer_strategy import (
             MIPSolverResult, build_transfer_timeline
         )
         
@@ -1445,7 +1936,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
 
     def test_format_timeline_for_latex(self):
         """Test LaTeX formatting of timeline."""
-        from fpl_report.transfer_strategy import (
+        from reports.fpl_report.transfer_strategy import (
             MIPSolverResult, build_transfer_timeline, format_timeline_for_latex
         )
         
@@ -1462,7 +1953,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
             budget_remaining=1.0
         )
         
-        timeline = build_transfer_timeline(result, current_gw=16, horizon=5)
+        timeline = build_transfer_timeline(result, current_gw=17, horizon=5)
         latex = format_timeline_for_latex(timeline)
         
         # Should contain TikZ elements
@@ -1472,7 +1963,7 @@ class TestMultiPeriodPlanning(unittest.TestCase):
 
     def test_multiperiod_plan_dataclass(self):
         """Test MultiPeriodPlan dataclass fields."""
-        from fpl_report.transfer_strategy import MultiPeriodPlan
+        from reports.fpl_report.transfer_strategy import MultiPeriodPlan
         
         plan = MultiPeriodPlan(
             status='optimal',
@@ -1496,7 +1987,7 @@ class TestMIPSolverIntegration(unittest.TestCase):
     def setUpClass(cls):
         """Check if MIP solver is available."""
         try:
-            from fpl_report.transfer_strategy import MIP_AVAILABLE
+            from reports.fpl_report.transfer_strategy import MIP_AVAILABLE
             cls.mip_available = MIP_AVAILABLE
         except ImportError:
             cls.mip_available = False
@@ -1563,7 +2054,7 @@ class TestMIPSolverIntegration(unittest.TestCase):
                 players.append({
                     'id': 500 + i * 4 + pos_type,
                     'web_name': f'CAND_{pos}_{i}',
-                    'team': (i % 16) + 1,
+                    'team': (i % 17) + 1,
                     'element_type': pos_type,
                     'now_cost': 50 + i * 5,
                     'minutes': 900,
@@ -1588,7 +2079,7 @@ class TestMIPSolverIntegration(unittest.TestCase):
         if not self.mip_available:
             self.skipTest("MIP solver not available")
         
-        from fpl_report.transfer_strategy import TransferMIPSolver
+        from reports.fpl_report.transfer_strategy import TransferMIPSolver
         
         current_squad, players_df, xp_matrix = self._make_simple_squad_and_candidates()
         
@@ -1617,6 +2108,1326 @@ class TestMIPSolverIntegration(unittest.TestCase):
             # Hit cost should be 0 for <= 1 transfer
             if result.num_transfers <= 1:
                 self.assertEqual(result.hit_cost, 0)
+
+
+class TestFPLCorePredictorCriticalIssues(unittest.TestCase):
+    """Tests for FPLCorePredictor critical issues fixes.
+    
+    Issue 1: Data leakage - points-derived features should be removed
+    Issue 2: Fixture context - should use real Elo values, not hardcoded
+    Issue 3: Chronological split - train/val should have no GW overlap
+    Issue 4: Position-specific models - should train separate models per position
+    """
+
+    def test_feature_cols_no_points_derived(self):
+        """Feature columns should not include points-derived features."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # These features are directly derived from event_points (target leakage)
+        points_derived = [
+            'avg_points_per_90',
+            'form_trend_3gw',
+            'form_trend_5gw', 
+            'consistency_score',
+        ]
+        
+        for feature in points_derived:
+            self.assertNotIn(
+                feature, 
+                predictor.feature_cols,
+                f"Points-derived feature '{feature}' should not be in feature_cols"
+            )
+    
+    def test_fixture_context_uses_real_values(self):
+        """Fixture context should use real Elo/home values, not hardcoded averages."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # Build minimal test data with known fixture info
+        all_gw_data = {
+            1: {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.5, 'xa': 0.3,
+                     'total_shots': 3, 'touches_opposition_box': 5}
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 6, 'minutes': 90, 'bps': 30, 'bonus': 1,
+                     'ict_index': 5.0, 'influence': 30, 'creativity': 20, 'threat': 40}
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 2, 'team_a_score': 0}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': 1, 'home_team': 1, 'away_team': 2, 
+                     'home_team_elo': 1900.0, 'away_team_elo': 1700.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1900.0},
+                    {'id': 2, 'elo': 1700.0}
+                ])
+            },
+            2: {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.3, 'xa': 0.2,
+                     'total_shots': 2, 'touches_opposition_box': 4}
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 3, 'minutes': 90, 'bps': 20, 'bonus': 0,
+                     'ict_index': 4.0, 'influence': 25, 'creativity': 15, 'threat': 30,
+                     'now_cost': 80}
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 2, 'team_a': 1, 'team_h_score': 1, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': 2, 'home_team': 2, 'away_team': 1,
+                     'home_team_elo': 1700.0, 'away_team_elo': 1900.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1900.0},
+                    {'id': 2, 'elo': 1700.0}
+                ])
+            }
+        }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Midfielder', 'team_code': 1}
+            ])
+        }
+        
+        # Build training dataset
+        df = predictor.build_training_dataset(all_gw_data, fpl_core_season_data, current_gw=2, min_gw=2)
+        
+        # is_home should be 0 or 1, never 0.5
+        if 'is_home' in df.columns and not df.empty:
+            is_home_vals = df['is_home'].unique()
+            self.assertTrue(
+                all(v in [0, 1, 0.0, 1.0] for v in is_home_vals),
+                f"is_home should be 0 or 1, got: {is_home_vals}"
+            )
+        
+        # fixture_difficulty should not always be 3.0
+        if 'fixture_difficulty' in df.columns and len(df) > 1:
+            fd_vals = df['fixture_difficulty'].unique()
+            self.assertFalse(
+                len(fd_vals) == 1 and fd_vals[0] == 3.0,
+                "fixture_difficulty should not always be hardcoded to 3.0"
+            )
+
+    def test_chronological_split_no_overlap(self):
+        """Train/val split should have no gameweek overlap."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # Create mock data spanning multiple gameweeks
+        all_gw_data = {}
+        for gw in range(1, 11):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': p, 'minutes_played': 90, 'xg': 0.3, 'xa': 0.2,
+                     'total_shots': 2, 'touches_opposition_box': 3}
+                    for p in [1, 2, 3]
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': p, 'event_points': 4 + (gw % 3), 'minutes': 90, 
+                     'bps': 25, 'bonus': 0, 'ict_index': 5.0, 'influence': 30, 
+                     'creativity': 20, 'threat': 35, 'now_cost': 70}
+                    for p in [1, 2, 3]
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 1, 'team_a_score': 0}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 2,
+                     'home_team_elo': 1800.0, 'away_team_elo': 1750.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1800.0},
+                    {'id': 2, 'elo': 1750.0}
+                ])
+            }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': p, 'position': 'Midfielder', 'team_code': 1}
+                for p in [1, 2, 3]
+            ])
+        }
+        
+        # Build dataset
+        df = predictor.build_training_dataset(all_gw_data, fpl_core_season_data, current_gw=10, min_gw=5)
+        
+        if df.empty or 'gameweek' not in df.columns:
+            self.skipTest("Not enough data to test split")
+        
+        # Call the split helper (we need to expose or test the split logic)
+        # For now, verify the split produces non-overlapping GWs
+        train_df, val_df = predictor._chronological_split(df, validation_split=0.2)
+        
+        if train_df.empty or val_df.empty:
+            self.skipTest("Split produced empty sets")
+        
+        train_gws = set(train_df['gameweek'].unique())
+        val_gws = set(val_df['gameweek'].unique())
+        
+        # No overlap
+        self.assertEqual(
+            len(train_gws & val_gws), 0,
+            f"Train/val GWs overlap: {train_gws & val_gws}"
+        )
+        
+        # Val GWs should be later than all train GWs
+        self.assertGreater(
+            min(val_gws), max(train_gws),
+            f"Validation GWs ({val_gws}) should be strictly after train GWs ({train_gws})"
+        )
+
+    def test_position_specific_models_trained(self):
+        """Predictor should train separate models per position."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # Create mock data with different positions
+        all_gw_data = {}
+        for gw in range(1, 8):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.0, 'xa': 0.0,
+                     'total_shots': 0, 'touches_opposition_box': 0, 'saves': 5},
+                    {'player_id': 2, 'minutes_played': 90, 'xg': 0.1, 'xa': 0.1,
+                     'total_shots': 1, 'touches_opposition_box': 2, 'clearances': 5},
+                    {'player_id': 3, 'minutes_played': 90, 'xg': 0.4, 'xa': 0.3,
+                     'total_shots': 3, 'touches_opposition_box': 6, 'chances_created': 2},
+                    {'player_id': 4, 'minutes_played': 90, 'xg': 0.6, 'xa': 0.1,
+                     'total_shots': 4, 'touches_opposition_box': 8, 'chances_created': 1},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 6, 'minutes': 90, 'bps': 30, 'bonus': 1,
+                     'ict_index': 3.0, 'influence': 40, 'creativity': 5, 'threat': 5, 'now_cost': 55},
+                    {'id': 2, 'event_points': 5, 'minutes': 90, 'bps': 25, 'bonus': 0,
+                     'ict_index': 4.0, 'influence': 35, 'creativity': 10, 'threat': 15, 'now_cost': 50},
+                    {'id': 3, 'event_points': 7, 'minutes': 90, 'bps': 35, 'bonus': 2,
+                     'ict_index': 7.0, 'influence': 30, 'creativity': 40, 'threat': 45, 'now_cost': 85},
+                    {'id': 4, 'event_points': 8, 'minutes': 90, 'bps': 40, 'bonus': 3,
+                     'ict_index': 8.0, 'influence': 25, 'creativity': 20, 'threat': 60, 'now_cost': 100},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 2, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 2,
+                     'home_team_elo': 1850.0, 'away_team_elo': 1800.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1850.0},
+                    {'id': 2, 'elo': 1800.0}
+                ])
+            }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Goalkeeper', 'team_code': 1},
+                {'player_id': 2, 'position': 'Defender', 'team_code': 1},
+                {'player_id': 3, 'position': 'Midfielder', 'team_code': 1},
+                {'player_id': 4, 'position': 'Forward', 'team_code': 2},
+            ])
+        }
+        
+        # Train the model
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=7, validation_split=0.2)
+        
+        # Check that position-specific models exist
+        self.assertTrue(
+            hasattr(predictor, 'position_models'),
+            "Predictor should have position_models attribute"
+        )
+        
+        # Each position should have its own model
+        expected_positions = ['GKP', 'DEF', 'MID', 'FWD']
+        for pos in expected_positions:
+            self.assertIn(
+                pos, predictor.position_models,
+                f"Position '{pos}' should have a dedicated model"
+            )
+
+
+class TestFallbackPredictorChronologicalSplit(unittest.TestCase):
+    """Test that fallback predictor also uses chronological GW-based split."""
+    
+    def test_predictor_has_chronological_split(self):
+        """FPLPointsPredictor should have _chronological_split method."""
+        from reports.fpl_report.predictor import FPLPointsPredictor
+        
+        # Create minimal mock fetcher
+        mock_fetcher = MagicMock()
+        mock_fetcher.get_current_gameweek.return_value = 10
+        mock_fetcher.fixtures_df = pd.DataFrame(columns=[
+            'event', 'team_h', 'team_a', 'team_h_difficulty', 'team_a_difficulty', 'finished'
+        ])
+        
+        predictor = FPLPointsPredictor(mock_fetcher)
+        
+        # The predictor should have a chronological split method
+        self.assertTrue(
+            hasattr(predictor, '_chronological_split'),
+            "Predictor should have _chronological_split method"
+        )
+    
+    def test_chronological_split_no_overlap(self):
+        """Chronological split should produce non-overlapping GW sets."""
+        from reports.fpl_report.predictor import FPLPointsPredictor
+        
+        mock_fetcher = MagicMock()
+        mock_fetcher.fixtures_df = pd.DataFrame()
+        
+        predictor = FPLPointsPredictor(mock_fetcher)
+        
+        # Create test data with gameweek column
+        test_df = pd.DataFrame({
+            'gameweek': [5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10],
+            'player_id': [1, 2, 3] * 6,
+            'target_points': [4, 5, 6] * 6
+        })
+        
+        train_df, val_df = predictor._chronological_split(test_df, validation_split=0.2)
+        
+        train_gws = set(train_df['gameweek'].unique())
+        val_gws = set(val_df['gameweek'].unique())
+        
+        # No overlap
+        self.assertEqual(
+            len(train_gws & val_gws), 0,
+            f"Train/val GWs should not overlap: {train_gws & val_gws}"
+        )
+        
+        # Val GWs should be later than all train GWs
+        if train_gws and val_gws:
+            self.assertGreater(
+                min(val_gws), max(train_gws),
+                f"Validation GWs ({val_gws}) should be after train GWs ({train_gws})"
+            )
+
+
+class TestFPLCorePredictorMultiGWFixtures(unittest.TestCase):
+    """Tests for multi-GW fixture-aware predictions in FPLCorePredictor.
+    
+    These tests verify:
+    1. predict_multiple_gws() is fixture-sensitive across the horizon
+    2. Output schema remains stable (predictions, cumulative, confidence, avg_per_gw)
+    3. Missing feature blocks produce sensible defaults without crash
+    4. Ensemble produces consistent, diverse predictions
+    """
+    
+    def test_predict_uses_fpl_api_fixture_fallback(self):
+        """predict should pull next-GW fixtures from fpl_api_fixtures when all_gw_data lacks future entries."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+
+        predictor = FPLCorePredictor()
+        predictor.is_trained = True
+        predictor._reset_context_caches()
+
+        # Make position models appear trained but skip heavy model objects
+        for pos in predictor.POSITIONS:
+            predictor.position_models[pos]['is_trained'] = True
+            predictor.position_models[pos]['feature_cols'] = []
+        predictor.fallback_models['is_trained'] = True
+        predictor.fallback_models['feature_cols'] = []
+
+        # Stub heavy helpers to avoid real model inference
+        predictor._predict_with_stack = lambda model_data, X_raw: np.zeros(X_raw.shape[0])
+        predictor._aggregate_match_stats = lambda pms_list, pid, upto, window=4: {'minutes_played': 180}
+        predictor._aggregate_gw_stats = lambda pgs_list, pid, upto, window=4, playermatchstats_list=None: {'now_cost': 50}
+        predictor._calculate_team_strength = lambda all_gw_data, up_to_gw=None: {
+            1: {'attack': 1.5, 'defense': 1.5},
+            3: {'attack': 1.4, 'defense': 1.6},
+        }
+
+        # Historical data only (no future GW entry)
+        all_gw_data = {
+            8: {
+                'playermatchstats': pd.DataFrame([{'player_id': 1, 'minutes_played': 90}]),
+                'player_gameweek_stats': pd.DataFrame([{'id': 1, 'event_points': 5, 'minutes': 90, 'now_cost': 85}]),
+            }
+        }
+        fpl_core_season_data = {
+            'players': pd.DataFrame([{'player_id': 1, 'position': 'Midfielder', 'team_code': 1}]),
+            'fpl_api_fixtures': pd.DataFrame([
+                {'event': 9, 'team_h': 1, 'team_a': 3, 'team_h_difficulty': 2, 'team_a_difficulty': 4}
+            ]),
+        }
+
+        preds = predictor.predict(all_gw_data, fpl_core_season_data, [1], current_gw=8)
+
+        self.assertIn(1, preds, "Predict should return result for player when trained")
+        self.assertIn((1, 9), predictor._fixture_cache,
+                      "Fallback fixtures should populate cache for next GW when missing in all_gw_data")
+
+    def _make_multi_gw_test_data(self, num_gws: int = 10):
+        """Create test data spanning multiple gameweeks with varied fixtures.
+        
+        Creates different fixture contexts to ensure predictions vary by GW.
+        """
+        all_gw_data = {}
+        
+        # Create fixtures with varying difficulty for different GWs
+        # Player 1 on team 1 will face alternating easy/hard opponents
+        for gw in range(1, num_gws + 1):
+            # Alternate between easy (team 3, low elo) and hard (team 4, high elo) opponents
+            if gw % 2 == 0:
+                opp_team = 3  # Easy opponent
+                opp_elo = 1500.0
+            else:
+                opp_team = 4  # Hard opponent
+                opp_elo = 1950.0
+            
+            is_home = gw % 3 != 0  # Home 2/3 of the time
+            
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.4 + (gw % 3) * 0.1, 
+                     'xa': 0.2, 'total_shots': 3, 'touches_opposition_box': 5,
+                     'chances_created': 2, 'accurate_passes_percent': 85.0,
+                     'tackles': 2, 'interceptions': 1, 'clearances': 0},
+                    {'player_id': 2, 'minutes_played': 90, 'xg': 0.1, 'xa': 0.1,
+                     'total_shots': 1, 'touches_opposition_box': 2,
+                     'chances_created': 1, 'accurate_passes_percent': 80.0,
+                     'tackles': 4, 'interceptions': 3, 'clearances': 5},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 5 + (gw % 4), 'minutes': 90, 
+                     'bps': 30, 'bonus': 1, 'ict_index': 6.0, 
+                     'influence': 35, 'creativity': 25, 'threat': 40, 'now_cost': 85},
+                    {'id': 2, 'event_points': 4 + (gw % 3), 'minutes': 90,
+                     'bps': 25, 'bonus': 0, 'ict_index': 4.0,
+                     'influence': 30, 'creativity': 15, 'threat': 20, 'now_cost': 55},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1 if is_home else opp_team, 
+                     'team_a': opp_team if is_home else 1, 
+                     'team_h_score': 2, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 
+                     'home_team': 1 if is_home else opp_team, 
+                     'away_team': opp_team if is_home else 1,
+                     'home_team_elo': 1850.0 if is_home else opp_elo, 
+                     'away_team_elo': opp_elo if is_home else 1850.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1850.0},
+                    {'id': opp_team, 'elo': opp_elo}
+                ])
+            }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Midfielder', 'team_code': 1},
+                {'player_id': 2, 'position': 'Defender', 'team_code': 1},
+            ])
+        }
+        
+        return all_gw_data, fpl_core_season_data
+    
+    def test_predict_multiple_gws_schema_stability(self):
+        """Output schema should be stable: predictions list, cumulative, confidence, avg_per_gw."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_multi_gw_test_data(num_gws=8)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict multiple GWs
+        num_gws = 5
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1, 2], current_gw=8, num_gws=num_gws
+        )
+        
+        # Verify schema for each player
+        for pid in [1, 2]:
+            self.assertIn(pid, results, f"Player {pid} should be in results")
+            result = results[pid]
+            
+            # Required keys
+            self.assertIn('predictions', result, "Result should have 'predictions' key")
+            self.assertIn('cumulative', result, "Result should have 'cumulative' key")
+            self.assertIn('confidence', result, "Result should have 'confidence' key")
+            self.assertIn('avg_per_gw', result, "Result should have 'avg_per_gw' key")
+            
+            # predictions should be a list of length num_gws
+            self.assertIsInstance(result['predictions'], list)
+            self.assertEqual(
+                len(result['predictions']), num_gws,
+                f"predictions list should have {num_gws} elements"
+            )
+            
+            # cumulative should equal sum of predictions
+            expected_cumulative = sum(result['predictions'])
+            self.assertAlmostEqual(
+                result['cumulative'], expected_cumulative, places=1,
+                msg="cumulative should be sum of predictions"
+            )
+            
+            # confidence should be one of expected values
+            self.assertIn(
+                result['confidence'], ['high', 'medium', 'low'],
+                "confidence should be 'high', 'medium', or 'low'"
+            )
+    
+    def test_predict_multiple_gws_fixture_sensitivity(self):
+        """Predictions should vary based on fixture difficulty across the horizon."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_multi_gw_test_data(num_gws=8)
+        
+        # Add future fixtures with very different difficulties
+        # GW 9: Easy opponent (elo 1500)
+        # GW 10: Very hard opponent (elo 2000)
+        all_gw_data[9] = {
+            'fixtures': pd.DataFrame([
+                {'gameweek': 9, 'home_team': 1, 'away_team': 3,
+                 'home_team_elo': 1850.0, 'away_team_elo': 1500.0}
+            ]),
+            'teams': pd.DataFrame([
+                {'id': 1, 'elo': 1850.0},
+                {'id': 3, 'elo': 1500.0}
+            ])
+        }
+        all_gw_data[10] = {
+            'fixtures': pd.DataFrame([
+                {'gameweek': 10, 'home_team': 4, 'away_team': 1,
+                 'home_team_elo': 2000.0, 'away_team_elo': 1850.0}
+            ]),
+            'teams': pd.DataFrame([
+                {'id': 1, 'elo': 1850.0},
+                {'id': 4, 'elo': 2000.0}
+            ])
+        }
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict for GW 9-10 (2 weeks)
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=2
+        )
+        
+        self.assertIn(1, results)
+        preds = results[1]['predictions']
+        
+        # With fixture-aware predictions, we expect the predictions to be different
+        # (though exact values depend on model). At minimum, they shouldn't be identical.
+        # Note: This test will initially fail if using naive decay (0.95^i multiplier)
+        # which produces correlated predictions regardless of fixture.
+        
+        # Check that predictions are not just a geometric decay
+        if len(preds) >= 2 and preds[0] > 0:
+            ratio = preds[1] / preds[0] if preds[0] != 0 else 1.0
+            # If using naive 0.95 decay, ratio would be exactly 0.95
+            # With fixture-aware, it should vary
+            self.assertNotAlmostEqual(
+                ratio, 0.95, places=2,
+                msg="Predictions should not use naive 0.95 decay - should be fixture-aware"
+            )
+    
+    def test_predict_multiple_gws_handles_missing_fixtures(self):
+        """Predictor should handle missing future fixtures gracefully."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_multi_gw_test_data(num_gws=8)
+        
+        # No fixtures for GW 9-13 (missing future data)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict should not crash even without future fixtures
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=5
+        )
+        
+        self.assertIn(1, results)
+        preds = results[1]['predictions']
+        
+        # Should still produce 5 predictions
+        self.assertEqual(len(preds), 5)
+        
+        # All predictions should be non-negative
+        for i, p in enumerate(preds):
+            self.assertGreaterEqual(p, 0, f"Prediction for GW{9+i} should be non-negative")
+    
+    def test_predict_multiple_gws_missing_player_stats_window(self):
+        """Predictor should handle players with no recent match stats gracefully."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_multi_gw_test_data(num_gws=8)
+        
+        # Add a player with no match stats (injury, new signing, etc)
+        fpl_core_season_data['players'] = pd.concat([
+            fpl_core_season_data['players'],
+            pd.DataFrame([{'player_id': 99, 'position': 'Forward', 'team_code': 1}])
+        ], ignore_index=True)
+        
+        # Train (player 99 won't have training data)
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict for player 99 (no history)
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[99], current_gw=8, num_gws=3
+        )
+        
+        # Should have result for player 99
+        self.assertIn(99, results)
+        
+        # Should produce valid schema even with no data
+        result = results[99]
+        self.assertIn('predictions', result)
+        self.assertIn('cumulative', result)
+        self.assertEqual(len(result['predictions']), 3)
+    
+    def test_ensemble_model_diversity(self):
+        """Ensemble should use multiple diverse model types."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # Check for model diversity in position models
+        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+            model_data = predictor.position_models[pos]
+            
+            # Should have at least 2 different model types (originally gb + rf)
+            # After enhancement: should have gb, rf, xgb, ridge
+            model_keys = [k for k in model_data.keys() if k not in ['scaler', 'is_trained', 'samples', 'imputer', 'blender']]
+            self.assertGreaterEqual(
+                len(model_keys), 2,
+                f"Position {pos} should have at least 2 models for diversity"
+            )
+            
+            # Check for non-tree model (Ridge for linear diversity)
+            # This test will fail until we add Ridge
+            has_linear_model = any('ridge' in k.lower() for k in model_keys)
+            self.assertTrue(
+                has_linear_model,
+                f"Position {pos} should have a linear model (Ridge) for diversity"
+            )
+    
+    def test_fpl_api_fixtures_fallback(self):
+        """Predictor should use fpl_api_fixtures when Core Insights fixtures unavailable."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_multi_gw_test_data(num_gws=8)
+        
+        # Add FPL API fixtures fallback for future GWs
+        fpl_core_season_data['fpl_api_fixtures'] = pd.DataFrame([
+            {'event': 9, 'team_h': 1, 'team_a': 3, 
+             'team_h_difficulty': 2, 'team_a_difficulty': 4},
+            {'event': 10, 'team_h': 4, 'team_a': 1,
+             'team_h_difficulty': 3, 'team_a_difficulty': 5},
+            {'event': 11, 'team_h': 1, 'team_a': 5,
+             'team_h_difficulty': 2, 'team_a_difficulty': 3},
+        ])
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict - should use fallback fixtures for GW 9-11
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=3
+        )
+        
+        self.assertIn(1, results)
+        # Should have 3 predictions
+        self.assertEqual(len(results[1]['predictions']), 3)
+
+
+class TestFPLCorePredictorPositionFeatureSubsets(unittest.TestCase):
+    """Tests for per-position feature subsets in FPLCorePredictor.
+    
+    Each position should use a tailored feature subset:
+    - GKP: goalkeeper-relevant features (saves, goals_prevented, etc.)
+    - DEF: defensive features (tackles, clearances, etc.) + some attacking
+    - MID: balanced attacking/passing features
+    - FWD: attacking-heavy features (xG, shots, big_chances, etc.)
+    """
+    
+    def test_position_feature_cols_exists(self):
+        """Predictor should have position_feature_cols mapping."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        self.assertTrue(
+            hasattr(predictor, 'position_feature_cols'),
+            "Predictor should have position_feature_cols attribute"
+        )
+        
+        # Should have entry for each position
+        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+            self.assertIn(
+                pos, predictor.position_feature_cols,
+                f"position_feature_cols should have entry for {pos}"
+            )
+    
+    def test_gkp_features_include_saves(self):
+        """GKP feature subset should include goalkeeper-specific features."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        gkp_features = predictor.position_feature_cols.get('GKP', [])
+        
+        # GKP should have save-related features
+        gk_features_expected = ['avg_saves_per_90', 'avg_goals_prevented_per_90']
+        for feat in gk_features_expected:
+            self.assertIn(
+                feat, gkp_features,
+                f"GKP features should include {feat}"
+            )
+    
+    def test_fwd_features_exclude_gk_features(self):
+        """FWD feature subset should NOT include goalkeeper-specific features."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        fwd_features = predictor.position_feature_cols.get('FWD', [])
+        
+        # FWD should NOT have GK-specific features
+        gk_only_features = ['avg_saves_per_90', 'avg_saves_inside_box_per_90', 
+                           'avg_goals_prevented_per_90']
+        for feat in gk_only_features:
+            self.assertNotIn(
+                feat, fwd_features,
+                f"FWD features should NOT include {feat}"
+            )
+    
+    def test_fwd_features_include_attacking(self):
+        """FWD feature subset should include attacking features."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        fwd_features = predictor.position_feature_cols.get('FWD', [])
+        
+        # FWD should have attacking features
+        attacking_expected = ['avg_xg_per_90', 'avg_shots_per_90', 
+                              'avg_big_chances_per_90', 'avg_touches_box_per_90']
+        for feat in attacking_expected:
+            self.assertIn(
+                feat, fwd_features,
+                f"FWD features should include {feat}"
+            )
+    
+    def test_position_feature_subsets_are_strict_subsets_or_equal(self):
+        """Position feature subsets should be subsets of full feature_cols."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_features = set(predictor.feature_cols)
+        
+        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+            pos_features = set(predictor.position_feature_cols.get(pos, []))
+            
+            self.assertTrue(
+                pos_features.issubset(all_features),
+                f"{pos} features should be subset of full feature_cols. "
+                f"Extra features: {pos_features - all_features}"
+            )
+
+
+class TestFPLCorePredictorRecencyWeighting(unittest.TestCase):
+    """Tests for recency weighting in FPLCorePredictor training.
+    
+    More recent gameweeks should have higher sample weights during training.
+    """
+    
+    def _make_test_data(self, num_gws: int = 10):
+        """Create test data spanning multiple gameweeks."""
+        all_gw_data = {}
+        
+        for gw in range(1, num_gws + 1):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.4, 'xa': 0.2,
+                     'total_shots': 3, 'touches_opposition_box': 5,
+                     'chances_created': 2, 'accurate_passes_percent': 85.0,
+                     'tackles': 2, 'interceptions': 1, 'clearances': 0},
+                    {'player_id': 2, 'minutes_played': 90, 'xg': 0.1, 'xa': 0.1,
+                     'total_shots': 1, 'touches_opposition_box': 2,
+                     'chances_created': 1, 'accurate_passes_percent': 80.0,
+                     'tackles': 4, 'interceptions': 3, 'clearances': 5},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 5 + (gw % 4), 'minutes': 90,
+                     'bps': 30, 'bonus': 1, 'ict_index': 6.0,
+                     'influence': 35, 'creativity': 25, 'threat': 40, 'now_cost': 85},
+                    {'id': 2, 'event_points': 4 + (gw % 3), 'minutes': 90,
+                     'bps': 25, 'bonus': 0, 'ict_index': 4.0,
+                     'influence': 30, 'creativity': 15, 'threat': 20, 'now_cost': 55},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 2, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 2,
+                     'home_team_elo': 1850.0, 'away_team_elo': 1750.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1850.0},
+                    {'id': 2, 'elo': 1750.0}
+                ])
+            }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Midfielder', 'team_code': 1},
+                {'player_id': 2, 'position': 'Defender', 'team_code': 1},
+            ])
+        }
+        
+        return all_gw_data, fpl_core_season_data
+    
+    def test_train_accepts_recency_weighting_arg(self):
+        """train() should accept recency_weighting argument."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Should not raise when recency_weighting is passed
+        try:
+            predictor.train(
+                all_gw_data, fpl_core_season_data, 
+                current_gw=8, validation_split=0.2,
+                recency_weighting=True
+            )
+        except TypeError as e:
+            self.fail(f"train() should accept recency_weighting arg: {e}")
+    
+    def test_train_accepts_recency_half_life_arg(self):
+        """train() should accept recency_half_life_gws argument."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Should not raise when recency_half_life_gws is passed
+        try:
+            predictor.train(
+                all_gw_data, fpl_core_season_data,
+                current_gw=8, validation_split=0.2,
+                recency_weighting=True,
+                recency_half_life_gws=4.0
+            )
+        except TypeError as e:
+            self.fail(f"train() should accept recency_half_life_gws arg: {e}")
+    
+    def test_recency_weighting_disabled_by_default_is_false(self):
+        """recency_weighting should default to True."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        import inspect
+        
+        predictor = FPLCorePredictor()
+        
+        # Get train method signature
+        sig = inspect.signature(predictor.train)
+        params = sig.parameters
+        
+        # recency_weighting should have default True
+        self.assertIn('recency_weighting', params)
+        self.assertEqual(
+            params['recency_weighting'].default, True,
+            "recency_weighting should default to True"
+        )
+    
+    def test_train_model_stack_accepts_sample_weight(self):
+        """_train_model_stack should accept sample_weight argument."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        import inspect
+        
+        predictor = FPLCorePredictor()
+        
+        # Get _train_model_stack signature
+        sig = inspect.signature(predictor._train_model_stack)
+        params = sig.parameters
+        
+        self.assertIn(
+            'sample_weight', params,
+            "_train_model_stack should accept sample_weight argument"
+        )
+
+
+class TestFPLCorePredictorUncertaintyOutput(unittest.TestCase):
+    """Tests for ensemble uncertainty outputs in predict_multiple_gws.
+    
+    The multi-GW prediction results should include:
+    - std_dev: average model disagreement across the horizon
+    - std_dev_by_gw: list of per-GW disagreement values
+    """
+    
+    def _make_test_data(self, num_gws: int = 10):
+        """Create test data spanning multiple gameweeks."""
+        all_gw_data = {}
+        
+        for gw in range(1, num_gws + 1):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    {'player_id': 1, 'minutes_played': 90, 'xg': 0.4, 'xa': 0.2,
+                     'total_shots': 3, 'touches_opposition_box': 5,
+                     'chances_created': 2, 'accurate_passes_percent': 85.0,
+                     'tackles': 2, 'interceptions': 1, 'clearances': 0},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 1, 'event_points': 5 + (gw % 4), 'minutes': 90,
+                     'bps': 30, 'bonus': 1, 'ict_index': 6.0,
+                     'influence': 35, 'creativity': 25, 'threat': 40, 'now_cost': 85},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 2, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 2,
+                     'home_team_elo': 1850.0, 'away_team_elo': 1750.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1850.0},
+                    {'id': 2, 'elo': 1750.0}
+                ])
+            }
+        
+        fpl_core_season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 1, 'position': 'Midfielder', 'team_code': 1},
+            ])
+        }
+        
+        return all_gw_data, fpl_core_season_data
+    
+    def test_predict_multiple_gws_includes_std_dev(self):
+        """predict_multiple_gws result should include std_dev key."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=5
+        )
+        
+        self.assertIn(1, results)
+        self.assertIn(
+            'std_dev', results[1],
+            "Result should include 'std_dev' key for average model disagreement"
+        )
+        
+        # std_dev should be a number
+        self.assertIsInstance(
+            results[1]['std_dev'], (int, float),
+            "std_dev should be a numeric value"
+        )
+    
+    def test_predict_multiple_gws_includes_std_dev_by_gw(self):
+        """predict_multiple_gws result should include std_dev_by_gw list."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict
+        num_gws = 5
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=num_gws
+        )
+        
+        self.assertIn(1, results)
+        self.assertIn(
+            'std_dev_by_gw', results[1],
+            "Result should include 'std_dev_by_gw' key for per-GW uncertainty"
+        )
+        
+        # std_dev_by_gw should be a list
+        self.assertIsInstance(
+            results[1]['std_dev_by_gw'], list,
+            "std_dev_by_gw should be a list"
+        )
+        
+        # Length should match num_gws
+        self.assertEqual(
+            len(results[1]['std_dev_by_gw']), num_gws,
+            f"std_dev_by_gw should have {num_gws} elements"
+        )
+    
+    def test_std_dev_by_gw_matches_predictions_length(self):
+        """std_dev_by_gw length should match predictions length."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict different horizons
+        for num_gws in [3, 5, 7]:
+            results = predictor.predict_multiple_gws(
+                all_gw_data, fpl_core_season_data,
+                player_ids=[1], current_gw=8, num_gws=num_gws
+            )
+            
+            preds_len = len(results[1]['predictions'])
+            std_len = len(results[1]['std_dev_by_gw'])
+            
+            self.assertEqual(
+                preds_len, std_len,
+                f"predictions ({preds_len}) and std_dev_by_gw ({std_len}) "
+                f"should have same length for num_gws={num_gws}"
+            )
+    
+    def test_std_dev_values_are_non_negative(self):
+        """All std_dev values should be non-negative."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        all_gw_data, fpl_core_season_data = self._make_test_data(num_gws=8)
+        
+        # Train
+        predictor.train(all_gw_data, fpl_core_season_data, current_gw=8, validation_split=0.2)
+        
+        # Predict
+        results = predictor.predict_multiple_gws(
+            all_gw_data, fpl_core_season_data,
+            player_ids=[1], current_gw=8, num_gws=5
+        )
+        
+        # Overall std_dev should be >= 0
+        self.assertGreaterEqual(
+            results[1]['std_dev'], 0,
+            "std_dev should be non-negative"
+        )
+        
+        # All per-GW std_dev values should be >= 0
+        for i, std_val in enumerate(results[1]['std_dev_by_gw']):
+            self.assertGreaterEqual(
+                std_val, 0,
+                f"std_dev_by_gw[{i}] should be non-negative"
+            )
+
+
+class TestFPLCorePredictorCrossSeasonTraining(unittest.TestCase):
+    """Tests for cross-season training in FPLCorePredictor.
+    
+    Validates:
+    1. Active-only filtering: Previous season players not in current season are excluded
+    2. Current-season-only validation: Validation split uses only current season GWs
+    3. Season weighting: Current season samples get 2x weight vs previous season
+    """
+    
+    def _make_prev_season_data(self, num_gws: int = 10):
+        """Create mock previous season data (e.g., 2024-25)."""
+        all_gw_data = {}
+        
+        for gw in range(1, num_gws + 1):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    # Player 1 exists in both seasons (player_code 100)
+                    {'player_id': 101, 'minutes_played': 90, 'xg': 0.3, 'xa': 0.2,
+                     'total_shots': 2, 'touches_opposition_box': 4},
+                    # Player 2 exists only in prev season (player_code 200)
+                    {'player_id': 102, 'minutes_played': 90, 'xg': 0.4, 'xa': 0.1,
+                     'total_shots': 3, 'touches_opposition_box': 5},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 101, 'event_points': 5 + (gw % 3), 'minutes': 90, 'bps': 25, 
+                     'ict_index': 5.0, 'influence': 30, 'creativity': 20, 'threat': 35, 'now_cost': 70},
+                    {'id': 102, 'event_points': 4 + (gw % 2), 'minutes': 90, 'bps': 20, 
+                     'ict_index': 4.5, 'influence': 25, 'creativity': 18, 'threat': 30, 'now_cost': 60},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 2, 'team_h_score': 2, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 2,
+                     'home_team_elo': 1800.0, 'away_team_elo': 1700.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1800.0},
+                    {'id': 2, 'elo': 1700.0}
+                ])
+            }
+        
+        # Previous season players data with player_code
+        season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 101, 'player_code': 100, 'position': 'Midfielder', 'team_code': 1},
+                {'player_id': 102, 'player_code': 200, 'position': 'Forward', 'team_code': 2},
+            ])
+        }
+        
+        return all_gw_data, season_data
+    
+    def _make_current_season_data(self, num_gws: int = 8):
+        """Create mock current season data (e.g., 2025-26)."""
+        all_gw_data = {}
+        
+        for gw in range(1, num_gws + 1):
+            all_gw_data[gw] = {
+                'playermatchstats': pd.DataFrame([
+                    # Player 1 exists in both seasons (player_code 100, new ID 201)
+                    {'player_id': 201, 'minutes_played': 90, 'xg': 0.35, 'xa': 0.25,
+                     'total_shots': 3, 'touches_opposition_box': 5},
+                    # Player 3 is new this season (player_code 300)
+                    {'player_id': 203, 'minutes_played': 90, 'xg': 0.5, 'xa': 0.3,
+                     'total_shots': 4, 'touches_opposition_box': 6},
+                ]),
+                'player_gameweek_stats': pd.DataFrame([
+                    {'id': 201, 'event_points': 6 + (gw % 3), 'minutes': 90, 'bps': 28, 
+                     'ict_index': 5.5, 'influence': 32, 'creativity': 22, 'threat': 38, 'now_cost': 75},
+                    {'id': 203, 'event_points': 7 + (gw % 2), 'minutes': 90, 'bps': 30, 
+                     'ict_index': 6.0, 'influence': 35, 'creativity': 25, 'threat': 42, 'now_cost': 85},
+                ]),
+                'matches': pd.DataFrame([
+                    {'team_h': 1, 'team_a': 3, 'team_h_score': 1, 'team_a_score': 1}
+                ]),
+                'fixtures': pd.DataFrame([
+                    {'gameweek': gw, 'home_team': 1, 'away_team': 3,
+                     'home_team_elo': 1850.0, 'away_team_elo': 1750.0}
+                ]),
+                'teams': pd.DataFrame([
+                    {'id': 1, 'elo': 1850.0},
+                    {'id': 3, 'elo': 1750.0}
+                ])
+            }
+        
+        # Current season players data with player_code
+        # Note: player_code 100 exists in both seasons, 200 only in prev, 300 only in current
+        season_data = {
+            'players': pd.DataFrame([
+                {'player_id': 201, 'player_code': 100, 'position': 'Midfielder', 'team_code': 1},
+                {'player_id': 203, 'player_code': 300, 'position': 'Forward', 'team_code': 3},
+            ])
+        }
+        
+        return all_gw_data, season_data
+    
+    def test_build_cross_season_filters_inactive_players(self):
+        """Cross-season dataset should exclude players not in current season."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        prev_gw_data, prev_season_data = self._make_prev_season_data(num_gws=10)
+        curr_gw_data, curr_season_data = self._make_current_season_data(num_gws=8)
+        
+        prev_df, curr_df = predictor.build_cross_season_training_dataset(
+            prev_all_gw_data=prev_gw_data,
+            prev_fpl_core_season_data=prev_season_data,
+            prev_season_start_year=2024,
+            current_all_gw_data=curr_gw_data,
+            current_fpl_core_season_data=curr_season_data,
+            current_season_start_year=2025,
+            current_gw=8,
+            min_gw=5,
+        )
+        
+        # Previous season should only have player 101 (player_code 100)
+        # Player 102 (player_code 200) should be filtered out
+        if not prev_df.empty:
+            prev_player_ids = prev_df['player_id'].unique().tolist()
+            self.assertIn(101, prev_player_ids, 
+                         "Player 101 (active in current season) should be included")
+            self.assertNotIn(102, prev_player_ids,
+                            "Player 102 (not in current season) should be filtered out")
+    
+    def test_train_cross_season_validation_is_current_season_only(self):
+        """Validation samples should come only from current season."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        prev_gw_data, prev_season_data = self._make_prev_season_data(num_gws=10)
+        curr_gw_data, curr_season_data = self._make_current_season_data(num_gws=8)
+        
+        # Train cross-season
+        predictor.train_cross_season(
+            prev_all_gw_data=prev_gw_data,
+            prev_fpl_core_season_data=prev_season_data,
+            prev_season_start_year=2024,
+            current_all_gw_data=curr_gw_data,
+            current_fpl_core_season_data=curr_season_data,
+            current_season_start_year=2025,
+            current_gw=8,
+            validation_split=0.2,
+        )
+        
+        # Check metrics for cross-season info
+        self.assertIn('cross_season', predictor.metrics,
+                     "Metrics should include cross_season info")
+        
+        cross_season_metrics = predictor.metrics['cross_season']
+        
+        # Validation GWs should be from current season only (later GWs)
+        val_gws = cross_season_metrics.get('val_gws', [])
+        if val_gws:
+            # All validation GWs should be from current season (GW5+)
+            for gw in val_gws:
+                self.assertGreaterEqual(gw, 5,
+                                       f"Validation GW {gw} should be >= 5 (min_gw)")
+    
+    def test_train_cross_season_season_weights_recorded(self):
+        """Cross-season training should record the season weights used."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        prev_gw_data, prev_season_data = self._make_prev_season_data(num_gws=10)
+        curr_gw_data, curr_season_data = self._make_current_season_data(num_gws=8)
+        
+        # Train with specific weights
+        predictor.train_cross_season(
+            prev_all_gw_data=prev_gw_data,
+            prev_fpl_core_season_data=prev_season_data,
+            prev_season_start_year=2024,
+            current_all_gw_data=curr_gw_data,
+            current_fpl_core_season_data=curr_season_data,
+            current_season_start_year=2025,
+            current_gw=8,
+            current_season_weight=2.0,
+            prev_season_weight=1.0,
+        )
+        
+        # Verify metrics record the weights
+        self.assertIn('cross_season', predictor.metrics)
+        season_weights = predictor.metrics['cross_season'].get('season_weights', {})
+        
+        self.assertEqual(season_weights.get('current'), 2.0,
+                        "Current season weight should be recorded as 2.0")
+        self.assertEqual(season_weights.get('prev'), 1.0,
+                        "Previous season weight should be recorded as 1.0")
+    
+    def test_season_start_year_feature_added(self):
+        """season_start_year should be added to training samples."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        prev_gw_data, prev_season_data = self._make_prev_season_data(num_gws=10)
+        curr_gw_data, curr_season_data = self._make_current_season_data(num_gws=8)
+        
+        prev_df, curr_df = predictor.build_cross_season_training_dataset(
+            prev_all_gw_data=prev_gw_data,
+            prev_fpl_core_season_data=prev_season_data,
+            prev_season_start_year=2024,
+            current_all_gw_data=curr_gw_data,
+            current_fpl_core_season_data=curr_season_data,
+            current_season_start_year=2025,
+            current_gw=8,
+            min_gw=5,
+        )
+        
+        # Check previous season dataset has correct season_start_year
+        if not prev_df.empty:
+            self.assertIn('season_start_year', prev_df.columns,
+                         "Previous season df should have season_start_year column")
+            prev_years = prev_df['season_start_year'].unique()
+            self.assertEqual(len(prev_years), 1, 
+                            "All prev season rows should have same year")
+            self.assertEqual(prev_years[0], 2024,
+                            "Previous season should be 2024")
+        
+        # Check current season dataset has correct season_start_year
+        if not curr_df.empty:
+            self.assertIn('season_start_year', curr_df.columns,
+                         "Current season df should have season_start_year column")
+            curr_years = curr_df['season_start_year'].unique()
+            self.assertEqual(len(curr_years), 1,
+                            "All current season rows should have same year")
+            self.assertEqual(curr_years[0], 2025,
+                            "Current season should be 2025")
+    
+    def test_season_start_year_in_feature_cols(self):
+        """season_start_year should be in CONTEXT_FEATURES."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        self.assertIn('season_start_year', predictor.CONTEXT_FEATURES,
+                     "CONTEXT_FEATURES should include season_start_year")
+        self.assertIn('season_start_year', predictor.feature_cols,
+                     "feature_cols should include season_start_year")
+    
+    def test_reset_context_caches_clears_all_caches(self):
+        """_reset_context_caches should clear all context caches."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        # Populate caches with dummy data
+        predictor._team_strength = {'dummy': 'data'}
+        predictor._team_strength_by_gw = {1: {'dummy': 'data'}}
+        predictor._fixture_cache = {(1, 1): {'dummy': 'data'}}
+        
+        # Reset caches
+        predictor._reset_context_caches()
+        
+        # All caches should be empty
+        self.assertEqual(predictor._team_strength, {},
+                        "_team_strength should be cleared")
+        self.assertEqual(predictor._team_strength_by_gw, {},
+                        "_team_strength_by_gw should be cleared")
+        self.assertEqual(predictor._fixture_cache, {},
+                        "_fixture_cache should be cleared")
+    
+    def test_cross_season_metrics_include_sample_counts(self):
+        """Cross-season metrics should include sample counts per season."""
+        from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+        
+        predictor = FPLCorePredictor()
+        
+        prev_gw_data, prev_season_data = self._make_prev_season_data(num_gws=10)
+        curr_gw_data, curr_season_data = self._make_current_season_data(num_gws=8)
+        
+        predictor.train_cross_season(
+            prev_all_gw_data=prev_gw_data,
+            prev_fpl_core_season_data=prev_season_data,
+            prev_season_start_year=2024,
+            current_all_gw_data=curr_gw_data,
+            current_fpl_core_season_data=curr_season_data,
+            current_season_start_year=2025,
+            current_gw=8,
+        )
+        
+        cross_season = predictor.metrics.get('cross_season', {})
+        
+        self.assertIn('prev_season_samples', cross_season,
+                     "Should record prev_season_samples count")
+        self.assertIn('current_season_samples', cross_season,
+                     "Should record current_season_samples count")
+        
+        # Both should be integers >= 0
+        self.assertIsInstance(cross_season['prev_season_samples'], int)
+        self.assertIsInstance(cross_season['current_season_samples'], int)
 
 
 if __name__ == "__main__":
