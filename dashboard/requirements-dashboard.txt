@@ -1,0 +1,4 @@
+# Dashboard-specific dependencies (in addition to main requirements.txt)
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+apscheduler>=3.10.0
