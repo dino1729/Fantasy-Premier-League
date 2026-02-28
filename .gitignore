@@ -39,3 +39,6 @@ docs/*.md
 docs/*.pdf
 
 .cursor
+
+simulation_results*
+.worktrees/

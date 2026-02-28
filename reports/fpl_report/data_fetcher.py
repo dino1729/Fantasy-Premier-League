@@ -475,6 +475,142 @@ class FPLDataFetcher:
         """Get list of chips used this season."""
         return self.team_data.get('chips', [])
 
+    def get_squad_issues(self, squad: List[Dict] = None, gameweek: int = None) -> Dict:
+        """Detect squad issues that inform chip recommendations.
+
+        Analyzes the current squad for:
+        - Injuries (chance_of_playing < 75%)
+        - Suspension risk (4 or 9 yellow cards)
+        - Price drop risk (negative cost_change_event or trending down)
+        - Ownership decline (transfers_out > transfers_in significantly)
+
+        Args:
+            squad: List of player dicts with stats. If None, fetches current squad.
+            gameweek: Target gameweek. If None, uses current.
+
+        Returns:
+            Dict with categorized issues:
+            {
+                'injuries': [{'name': str, 'chance': int, 'return_estimate': str}],
+                'suspension_risk': [{'name': str, 'yellows': int, 'threshold': int}],
+                'price_drops': [{'name': str, 'change': float, 'trend': str}],
+                'ownership_decline': [{'name': str, 'net_transfers': int, 'ownership': float}],
+                'total_issues': int,
+                'summary': str
+            }
+        """
+        if squad is None:
+            squad = self.get_current_squad(gameweek)
+
+        issues = {
+            'injuries': [],
+            'suspension_risk': [],
+            'price_drops': [],
+            'ownership_decline': [],
+            'total_issues': 0,
+            'summary': ''
+        }
+
+        for player in squad:
+            stats = player.get('stats', {})
+            name = player.get('name', stats.get('web_name', 'Unknown'))
+
+            # Check injuries (chance_of_playing < 75%)
+            chance = stats.get('chance_of_playing_next_round')
+            if chance is not None and chance < 75:
+                # Estimate return based on news if available
+                news = stats.get('news', '')
+                return_est = 'Unknown'
+                if 'unknown' in news.lower():
+                    return_est = 'Unknown'
+                elif any(x in news.lower() for x in ['week', 'wk']):
+                    return_est = news[:50] if news else 'Short-term'
+                elif any(x in news.lower() for x in ['month', 'mth']):
+                    return_est = 'Long-term'
+                elif chance == 0:
+                    return_est = 'Out'
+                else:
+                    return_est = 'Doubt'
+
+                issues['injuries'].append({
+                    'name': name,
+                    'chance': chance,
+                    'return_estimate': return_est,
+                    'news': news[:100] if news else ''
+                })
+
+            # Check suspension risk (4 yellows = 1 away from 5-game ban, 9 = 1 away from 10-game ban)
+            yellows = int(stats.get('yellow_cards', 0) or 0)
+            if yellows == 4:
+                issues['suspension_risk'].append({
+                    'name': name,
+                    'yellows': yellows,
+                    'threshold': 5,
+                    'risk_level': 'high'
+                })
+            elif yellows == 9:
+                issues['suspension_risk'].append({
+                    'name': name,
+                    'yellows': yellows,
+                    'threshold': 10,
+                    'risk_level': 'high'
+                })
+            elif yellows == 3 or yellows == 8:
+                issues['suspension_risk'].append({
+                    'name': name,
+                    'yellows': yellows,
+                    'threshold': 5 if yellows == 3 else 10,
+                    'risk_level': 'medium'
+                })
+
+            # Check price drop risk
+            cost_change = stats.get('cost_change_event', 0) or 0
+            cost_change_start = stats.get('cost_change_start', 0) or 0
+            if cost_change < 0 or cost_change_start < -2:  # Lost 0.2m+ this season
+                trend = 'falling' if cost_change < 0 else 'down this season'
+                issues['price_drops'].append({
+                    'name': name,
+                    'change': cost_change / 10,  # Convert to millions
+                    'change_season': cost_change_start / 10,
+                    'trend': trend
+                })
+
+            # Check ownership decline (significant net negative transfers)
+            transfers_in = int(stats.get('transfers_in_event', 0) or 0)
+            transfers_out = int(stats.get('transfers_out_event', 0) or 0)
+            ownership = float(stats.get('selected_by_percent', 0) or 0)
+            net_transfers = transfers_in - transfers_out
+
+            # Significant decline: losing > 100k managers this GW, or > 2% ownership drop potential
+            if net_transfers < -100000 or (ownership > 5 and net_transfers < -50000):
+                issues['ownership_decline'].append({
+                    'name': name,
+                    'net_transfers': net_transfers,
+                    'transfers_in': transfers_in,
+                    'transfers_out': transfers_out,
+                    'ownership': ownership
+                })
+
+        # Calculate totals and summary
+        total = (len(issues['injuries']) + len(issues['suspension_risk']) +
+                 len(issues['price_drops']) + len(issues['ownership_decline']))
+        issues['total_issues'] = total
+
+        # Build summary string
+        summary_parts = []
+        if issues['injuries']:
+            summary_parts.append(f"{len(issues['injuries'])} injured")
+        if issues['suspension_risk']:
+            summary_parts.append(f"{len(issues['suspension_risk'])} suspension risk")
+        if issues['price_drops']:
+            summary_parts.append(f"{len(issues['price_drops'])} price drop risk")
+        if issues['ownership_decline']:
+            summary_parts.append(f"{len(issues['ownership_decline'])} losing ownership")
+
+        issues['summary'] = ', '.join(summary_parts) if summary_parts else 'No major issues detected'
+
+        return issues
+
     def get_transfers(self) -> List[Dict]:
         """Get transfer history for the team."""
         transfers = get_entry_transfers_data(self.team_id) or []

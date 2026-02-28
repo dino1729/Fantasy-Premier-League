@@ -501,6 +501,57 @@ def main():
         print(f"[WARNING] Multi-week strategy generation failed: {e}")
         multi_week_strategy = None
 
+    # Generate chip analysis for personalized recommendations
+    log("Analyzing chip opportunities...", verbose)
+    chip_analysis = None
+    try:
+        chip_analysis = strategy_planner.analyze_chip_opportunities(
+            squad_analysis=squad_analysis,
+            chips_used=chips_used,
+            gw_history=gw_history,
+            ml_position=None  # TODO: Add ML position data in Phase 2
+        )
+        issues = chip_analysis.get('squad_issues', {})
+        print(f"  Squad issues detected: {issues.get('summary', 'None')}")
+        print(f"  Chips remaining (this half): {chip_analysis.get('chips_remaining_display', '?')}")
+        if chip_analysis.get('deadline_warning'):
+            print(f"  ⚠ DEADLINE: {chip_analysis['deadline_warning']['message']}")
+    except Exception as e:
+        print(f"  [WARN] Chip analysis failed: {e}")
+        chip_analysis = None
+
+    # Generate Phase 2 chip projections (BB/TC/FH/WC optimizer-based)
+    log("Generating Phase 2 chip projections (optimizer-based)...", verbose)
+    try:
+        phase2_analysis = strategy_planner.get_phase2_chip_analysis(
+            squad_analysis=squad_analysis,
+            chips_used=chips_used,
+            gw_history=gw_history
+        )
+        # Merge Phase 2 into chip_analysis
+        if chip_analysis is None:
+            chip_analysis = {}
+        chip_analysis['phase2'] = phase2_analysis
+
+        # Report what was generated
+        if phase2_analysis.get('bb_projections'):
+            bb = phase2_analysis['bb_projections']
+            print(f"  BB Projections: {bb.get('recommendation', 'Available')}")
+        if phase2_analysis.get('tc_rankings'):
+            tc = phase2_analysis['tc_rankings']
+            print(f"  TC Rankings: {tc.get('recommendation', 'Available')}")
+        if phase2_analysis.get('fh_squad'):
+            fh = phase2_analysis['fh_squad']
+            print(f"  FH Squad: {fh.get('recommendation', 'Generated')}")
+        if phase2_analysis.get('wc_squad'):
+            wc = phase2_analysis['wc_squad']
+            print(f"  WC Squad: {wc.get('recommendation', 'Generated')}")
+    except Exception as e:
+        print(f"  [WARN] Phase 2 chip analysis failed: {e}")
+        if chip_analysis is None:
+            chip_analysis = {}
+        chip_analysis['phase2'] = None
+
     # Generate 5-GW predictions for ALL top players (for Wildcard/Free Hit drafts)
     log("Generating 5-GW predictions for draft candidates...", verbose)
     all_player_predictions = {}
@@ -988,7 +1039,8 @@ def main():
         wildcard_team=wildcard_team,
         free_hit_team=free_hit_team,
         season_history=season_history,
-        top_global_data=top_global_data
+        top_global_data=top_global_data,
+        chip_analysis=chip_analysis
     )
 
     # Write LaTeX file

@@ -222,7 +222,7 @@ class PlotGenerator:
         # Create a numeric matrix for coloring
         # 0: Not owned, 1: Bench, 2: Lineup, 3: Captain
         status_map = {'Bench': 1, 'Lineup': 2, 'Captain': 3}
-        color_matrix = pivot_status.replace(status_map).fillna(0)
+        color_matrix = pivot_status.replace(status_map).fillna(0).astype(float)
         
         # Custom colormap
         # 0: white, 1: pink (bench), 2: light blue (lineup), 3: green (captain)

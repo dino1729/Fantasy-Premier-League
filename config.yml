@@ -34,7 +34,7 @@ competitors:
 
 # Target gameweek to analyze (1-38)
 # Set to null to auto-detect the current/most recent completed gameweek.
-gameweek: 17
+gameweek: 21
 
 # Season identifier (used for data folder paths)
 season: "2025-26"
@@ -48,7 +48,7 @@ season: "2025-26"
 
 free_hit:
   # Target gameweek for Free Hit draft (null = next deadline GW)
-  target_gw: 18
+  target_gw: 24
   
   # Strategy mode - how aggressive to be with differentials:
   #   "safe"       - Maximize overlap with league template, minimal differentials
@@ -91,21 +91,24 @@ transfer_planner:
 # MIP SOLVER (Mathematical Optimization)
 # ═══════════════════════════════════════════════════════════════════════════
 # Uses Mixed-Integer Programming to find mathematically optimal transfers.
+# The multi-period solver optimizes WHEN to make each transfer across the
+# planning horizon, producing three scenarios (conservative/balanced/aggressive).
 # Requires sasoptpy + highspy packages (automatically detected).
 
 mip_solver:
   # Enable/disable MIP solver (true/false)
   # If disabled or unavailable, falls back to heuristic recommendations.
   enabled: true
-  
-  # Time limit in seconds (10-300)
-  # Higher = potentially better solutions but slower.
-  time_limit: 60
-  
-  # Candidate pool size per position (10-100)
+
+  # Time limit per scenario in seconds (60-600)
+  # The solver runs 3 scenarios, so total time = 3 x time_limit.
+  # Higher = better solutions but slower. Recommended: 120-300 for good results.
+  time_limit: 120
+
+  # Candidate pool size per position (20-100)
   # How many players per position to consider in optimization.
-  # Higher = more thorough but exponentially slower.
-  candidate_pool: 30
+  # Multi-period solver benefits from larger pools. Recommended: 40+
+  candidate_pool: 40
 
 
 # ═══════════════════════════════════════════════════════════════════════════
