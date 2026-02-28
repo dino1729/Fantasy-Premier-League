@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 import copy
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from reports.fpl_report.data_fetcher import (
     FPLDataFetcher, 
@@ -143,6 +143,46 @@ def get_top_global_comparison_ids(
         return [team_id] + [eid for eid in unique_top_ids if eid != team_id]
 
     return [team_id] + unique_top_ids
+
+
+def get_latest_available_fplcore_gw(
+    all_gw_data: Dict[int, Dict],
+    requested_gw: int,
+    dataset_name: str = "player_gameweek_stats",
+    require_finished_fixtures: bool = False,
+) -> Optional[int]:
+    """Return the latest GW <= requested_gw with non-empty FPL Core dataset."""
+    if not all_gw_data or requested_gw is None:
+        return None
+
+    available_gws: List[int] = []
+    for gw, gw_data in all_gw_data.items():
+        try:
+            gw_int = int(gw)
+        except (TypeError, ValueError):
+            continue
+
+        if gw_int > requested_gw or not isinstance(gw_data, dict):
+            continue
+
+        dataset = gw_data.get(dataset_name)
+        if dataset is None:
+            continue
+        if hasattr(dataset, "empty") and dataset.empty:
+            continue
+
+        if require_finished_fixtures:
+            fixtures = gw_data.get("fixtures")
+            if fixtures is None or not hasattr(fixtures, "empty") or fixtures.empty:
+                continue
+
+            if "finished" in fixtures.columns:
+                if not fixtures["finished"].fillna(False).all():
+                    continue
+
+        available_gws.append(gw_int)
+
+    return max(available_gws) if available_gws else None
 
 
 def main():
@@ -330,8 +370,17 @@ def main():
     except Exception as e:
         log(f"    Could not fetch next GW fixtures: {e}", verbose)
     
-    # Extract current gameweek data for convenience
-    fpl_core_gw_data = all_gw_data.get(gameweek, {})
+    # Use latest completed GW for per-GW FPL Core charts (current GW may be empty/in-progress)
+    fpl_core_effective_gw = get_latest_available_fplcore_gw(
+        all_gw_data,
+        gameweek,
+        require_finished_fixtures=True,
+    )
+    if fpl_core_effective_gw is None:
+        fpl_core_effective_gw = gameweek
+        fpl_core_gw_data = {}
+    else:
+        fpl_core_gw_data = all_gw_data.get(fpl_core_effective_gw, {})
     
     # Log summary
     if verbose:
@@ -501,6 +550,57 @@ def main():
         print(f"[WARNING] Multi-week strategy generation failed: {e}")
         multi_week_strategy = None
 
+    # Generate chip analysis for personalized recommendations
+    log("Analyzing chip opportunities...", verbose)
+    chip_analysis = None
+    try:
+        chip_analysis = strategy_planner.analyze_chip_opportunities(
+            squad_analysis=squad_analysis,
+            chips_used=chips_used,
+            gw_history=gw_history,
+            ml_position=None  # TODO: Add ML position data in Phase 2
+        )
+        issues = chip_analysis.get('squad_issues', {})
+        print(f"  Squad issues detected: {issues.get('summary', 'None')}")
+        print(f"  Chips remaining (this half): {chip_analysis.get('chips_remaining_display', '?')}")
+        if chip_analysis.get('deadline_warning'):
+            print(f"  ⚠ DEADLINE: {chip_analysis['deadline_warning']['message']}")
+    except Exception as e:
+        print(f"  [WARN] Chip analysis failed: {e}")
+        chip_analysis = None
+
+    # Generate Phase 2 chip projections (BB/TC/FH/WC optimizer-based)
+    log("Generating Phase 2 chip projections (optimizer-based)...", verbose)
+    try:
+        phase2_analysis = strategy_planner.get_phase2_chip_analysis(
+            squad_analysis=squad_analysis,
+            chips_used=chips_used,
+            gw_history=gw_history
+        )
+        # Merge Phase 2 into chip_analysis
+        if chip_analysis is None:
+            chip_analysis = {}
+        chip_analysis['phase2'] = phase2_analysis
+
+        # Report what was generated
+        if phase2_analysis.get('bb_projections'):
+            bb = phase2_analysis['bb_projections']
+            print(f"  BB Projections: {bb.get('recommendation', 'Available')}")
+        if phase2_analysis.get('tc_rankings'):
+            tc = phase2_analysis['tc_rankings']
+            print(f"  TC Rankings: {tc.get('recommendation', 'Available')}")
+        if phase2_analysis.get('fh_squad'):
+            fh = phase2_analysis['fh_squad']
+            print(f"  FH Squad: {fh.get('recommendation', 'Generated')}")
+        if phase2_analysis.get('wc_squad'):
+            wc = phase2_analysis['wc_squad']
+            print(f"  WC Squad: {wc.get('recommendation', 'Generated')}")
+    except Exception as e:
+        print(f"  [WARN] Phase 2 chip analysis failed: {e}")
+        if chip_analysis is None:
+            chip_analysis = {}
+        chip_analysis['phase2'] = None
+
     # Generate 5-GW predictions for ALL top players (for Wildcard/Free Hit drafts)
     log("Generating 5-GW predictions for draft candidates...", verbose)
     all_player_predictions = {}
@@ -534,34 +634,39 @@ def main():
     # Generate advanced finishing & creativity plots from FPL Core Insights data
     log("Generating advanced finishing & creativity analysis...", verbose)
     squad_ids = [p['id'] for p in squad]
+    if fpl_core_effective_gw != gameweek:
+        print(
+            f"  [INFO] Advanced finishing/creativity charts using latest completed GW{fpl_core_effective_gw} "
+            f"(GW{gameweek} data not complete yet)"
+        )
     try:
         # Clinical vs Wasteful Goals (league-wide context)
         plot_gen.generate_clinical_wasteful_chart(
             fpl_core_season_data,
             fpl_core_gw_data,
             squad_ids,
-            gameweek
+            fpl_core_effective_gw
         )
         # Clinical vs Wasteful Goals (squad-only)
         plot_gen.generate_clinical_wasteful_chart_squad_only(
             fpl_core_season_data,
             fpl_core_gw_data,
             squad_ids,
-            gameweek
+            fpl_core_effective_gw
         )
         # Clutch vs Frustrated Assists (league-wide context)
         plot_gen.generate_clutch_frustrated_chart(
             fpl_core_season_data,
             fpl_core_gw_data,
             squad_ids,
-            gameweek
+            fpl_core_effective_gw
         )
         # Clutch vs Frustrated Assists (squad-only)
         plot_gen.generate_clutch_frustrated_chart_squad_only(
             fpl_core_season_data,
             fpl_core_gw_data,
             squad_ids,
-            gameweek
+            fpl_core_effective_gw
         )
         # Usage vs Output Scatter (league-wide context)
         plot_gen.generate_usage_output_scatter(
@@ -988,7 +1093,8 @@ def main():
         wildcard_team=wildcard_team,
         free_hit_team=free_hit_team,
         season_history=season_history,
-        top_global_data=top_global_data
+        top_global_data=top_global_data,
+        chip_analysis=chip_analysis
     )
 
     # Write LaTeX file

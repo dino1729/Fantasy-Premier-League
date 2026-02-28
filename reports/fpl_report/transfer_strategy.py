@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 import tempfile
 import os
 
-from solver.optimizer import TransferMIPSolver, MIP_AVAILABLE
-from solver.definitions import MIPSolverResult
+from solver.optimizer import TransferMIPSolver, MultiPeriodMIPSolver, MIP_AVAILABLE
+from solver.definitions import MIPSolverResult, MultiPeriodResult, WeeklyPlan
 
 
 @dataclass
@@ -218,38 +218,51 @@ class TransferStrategyPlanner:
                 current_gw
             )
             result['mip_recommendation'] = mip_result
-            
+
             # If MIP found a solution, use it to EXCLUSIVELY drive the strategy
-            if mip_result.get('status') == 'optimal' and mip_result.get('transfers_in'):
-                try:
-                    # Convert MIP plan to standard format for compatibility (though we might hide it in report)
-                    result['planned_transfers'] = self._convert_mip_to_plan(
-                        mip_result, current_gw
-                    )
-                    
-                    # UPDATE EV based on MIP
-                    if mip_result.get('expected_points'):
-                        result['expected_value']['optimized_squad'] = mip_result['expected_points']
-                        result['expected_value']['potential_gain'] = round(
-                            mip_result['expected_points'] - current_squad_ev, 1
+            if mip_result.get('status') == 'optimal':
+                # Store multi-period specific data
+                result['scenarios'] = mip_result.get('scenarios', {})
+                result['weekly_plans'] = mip_result.get('weekly_plans', [])
+                result['transfer_sequence'] = mip_result.get('transfer_sequence', [])
+                result['watchlist'] = mip_result.get('watchlist', [])
+                result['confidence_per_gw'] = mip_result.get('confidence_per_gw', [])
+                result['recommended_scenario'] = mip_result.get('recommended', 'balanced')
+
+                if mip_result.get('transfers_in'):
+                    try:
+                        # Convert MIP plan to standard format for compatibility
+                        result['planned_transfers'] = self._convert_mip_to_plan(
+                            mip_result, current_gw
                         )
-                    
-                    # CRITICAL: Remove heuristic recommendations to satisfy "Only 1 Optimal Strategy" rule
-                    result['immediate_recommendations'] = [] 
+
+                        # UPDATE EV based on MIP
+                        if mip_result.get('expected_points'):
+                            baseline = mip_result.get('baseline_xp', current_squad_ev)
+                            result['expected_value']['current_squad'] = baseline
+                            result['expected_value']['optimized_squad'] = mip_result['expected_points']
+                            result['expected_value']['potential_gain'] = round(
+                                mip_result['expected_points'] - baseline, 1
+                            )
+
+                        # Remove heuristic recommendations - MIP takes over
+                        result['immediate_recommendations'] = []
+                        result['alternative_strategies'] = {}
+
+                    except Exception as e:
+                        print(f"Failed to convert MIP plan: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                # If MIP is optimal but suggests NO transfers
+                else:
+                    result['planned_transfers'] = []
+                    result['immediate_recommendations'] = []
                     result['alternative_strategies'] = {}
-                    
-                except Exception as e:
-                    print(f"Failed to convert MIP plan: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # If MIP is optimal but suggests NO transfers
-            elif mip_result.get('status') == 'optimal':
-                 result['planned_transfers'] = []
-                 result['immediate_recommendations'] = []
-                 result['alternative_strategies'] = {}
-                 result['expected_value']['optimized_squad'] = current_squad_ev
-                 result['expected_value']['potential_gain'] = 0.0
+                    baseline = mip_result.get('baseline_xp', current_squad_ev)
+                    result['expected_value']['current_squad'] = baseline
+                    result['expected_value']['optimized_squad'] = baseline
+                    result['expected_value']['potential_gain'] = 0.0
 
         elif use_mip and not MIP_AVAILABLE:
             result['mip_recommendation'] = {
@@ -259,56 +272,58 @@ class TransferStrategyPlanner:
         
         return result
     
-    def _run_mip_solver(self, squad_analysis: List[Dict], 
+    def _run_mip_solver(self, squad_analysis: List[Dict],
                         num_weeks: int,
                         time_limit: float,
                         candidate_pool: int,
                         free_transfers: int,
                         current_gw: int = None) -> Dict:
-        """Run the MIP solver and return results as a dict.
-        
+        """Run the multi-period MIP solver and return results with three scenarios.
+
         Args:
             squad_analysis: Current squad analysis.
             num_weeks: Planning horizon.
-            time_limit: Solver time limit.
+            time_limit: Solver time limit per scenario.
             candidate_pool: Candidates per position.
             free_transfers: Available free transfers.
-            
+
         Returns:
-            Dict with solver results suitable for LaTeX rendering.
+            Dict with solver results including three scenarios and weekly plans.
         """
         try:
             # Get current squad from fetcher
             if current_gw is None:
                 current_gw = self.fetcher.get_current_gameweek()
-                
+
             current_squad = self.fetcher.get_current_squad(current_gw)
             bank = self.fetcher.get_bank()
-            
+
             # Build xP matrix for all candidates
-            # First, get all player IDs we'll need predictions for
             squad_ids = [p['id'] for p in current_squad]
-            
+
             # Get top players from each position
             top_players = self.fetcher.players_df.nlargest(
                 candidate_pool * 4, 'total_points'
             )['id'].tolist()
-            
+
             all_ids = list(set(squad_ids + top_players))
-            
+
             # Get predictions
             predictions = self._predict_multiple_gws(all_ids, num_weeks)
-            
+
             # Convert to xP matrix format {id: [xp1, xp2, ...]}
             xp_matrix = {}
             for pid, pred in predictions.items():
                 xp_matrix[pid] = pred.get('predictions', [0.0] * num_weeks)
-            
+
             # Get teams data for name lookup
             teams_data = self.fetcher.bootstrap_data.get('teams', [])
-            
-            # Create and run solver
-            solver = TransferMIPSolver(
+
+            # Get rival squad IDs for differential analysis
+            rival_ids = self._get_rival_squad_ids()
+
+            # Create multi-period solver
+            solver = MultiPeriodMIPSolver(
                 current_squad=current_squad,
                 bank=bank,
                 players_df=self.fetcher.players_df,
@@ -317,41 +332,182 @@ class TransferStrategyPlanner:
                 horizon=num_weeks,
                 candidate_pool_size=candidate_pool,
                 time_limit=time_limit,
-                teams_data=teams_data
+                teams_data=teams_data,
+                rival_squad_ids=rival_ids,
+                current_gw=current_gw,
             )
-            
-            result = solver.solve()
-            
-            # Convert MIPSolverResult to dict for JSON/LaTeX compatibility
-            return {
-                'status': result.status,
-                'transfers_out': result.transfers_out,
-                'transfers_in': result.transfers_in,
-                'starting_xi': result.starting_xi,
-                'bench': result.bench,
-                'formation': result.formation,
-                'captain': result.captain,
-                'vice_captain': result.vice_captain,
-                'hit_cost': result.hit_cost,
-                'num_transfers': result.num_transfers,
-                'free_transfers_used': result.free_transfers_used,
-                'budget_remaining': result.budget_remaining,
-                'expected_points': result.expected_points,
-                'per_gw_xp': result.per_gw_xp,
-                'solver_time': result.solver_time,
-                'message': result.message
-            }
-            
+
+            # Solve for all three scenarios
+            multi_result = solver.solve(['conservative', 'balanced', 'aggressive'])
+
+            # Convert MultiPeriodResult to dict for compatibility
+            return self._format_multi_period_result(multi_result, current_gw)
+
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return {
                 'status': 'error',
                 'message': f'MIP solver error: {str(e)}',
+                'scenarios': {},
+                'recommended': 'balanced',
                 'transfers_out': [],
                 'transfers_in': [],
                 'hit_cost': 0,
                 'num_transfers': 0,
-                'expected_points': 0
+                'expected_points': 0,
+                'weekly_plans': [],
             }
+
+    def _get_rival_squad_ids(self) -> set:
+        """Get player IDs owned by mini-league rivals for differential analysis."""
+        rival_ids = set()
+        try:
+            competitors = getattr(self.fetcher, 'competitors', [])
+            if competitors:
+                for comp_id in competitors[:5]:  # Limit to top 5 rivals
+                    try:
+                        comp_squad = self.fetcher.get_team_picks(comp_id)
+                        if comp_squad:
+                            for pick in comp_squad.get('picks', []):
+                                rival_ids.add(pick.get('element'))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return rival_ids
+
+    def _format_multi_period_result(self, multi_result: MultiPeriodResult, current_gw: int) -> Dict:
+        """Format MultiPeriodResult for LaTeX/JSON compatibility."""
+        # Get the recommended scenario's result
+        recommended = multi_result.recommended or 'balanced'
+        main_result = getattr(multi_result, recommended) or multi_result.balanced
+
+        if not main_result:
+            return {
+                'status': 'error',
+                'message': 'No valid scenario results',
+                'scenarios': {},
+                'recommended': recommended,
+            }
+
+        # Format scenarios summary (including weekly plans for each)
+        scenarios_summary = {}
+        for scenario_name in ['conservative', 'balanced', 'aggressive']:
+            result = getattr(multi_result, scenario_name)
+            if result and result.status == 'optimal':
+                # Format weekly plans for this scenario
+                scenario_weekly_plans = []
+                for wp in result.weekly_plans:
+                    plan_dict = {
+                        'gameweek': wp.gameweek,
+                        'is_hold': wp.is_hold,
+                        'transfers_in': [{'name': p.get('name'), 'position': p.get('position'),
+                                          'team': p.get('team'), 'xp': p.get('xp', [0]),
+                                          'sell_price': p.get('sell_price', p.get('price', 0)),
+                                          'buy_price': p.get('buy_price', p.get('price', 0))}
+                                         for p in wp.transfers_in],
+                        'transfers_out': [{'name': p.get('name'), 'position': p.get('position'),
+                                           'team': p.get('team'), 'xp': p.get('xp', [0]),
+                                           'sell_price': p.get('sell_price', p.get('price', 0)),
+                                           'buy_price': p.get('buy_price', p.get('price', 0))}
+                                          for p in wp.transfers_out],
+                        'ft_available': wp.ft_available,
+                        'ft_used': wp.ft_used,
+                        'ft_remaining': wp.ft_remaining,
+                        'hit_cost': wp.hit_cost,
+                        'expected_xp': wp.expected_xp,
+                        'confidence': wp.confidence,
+                        'reasoning': wp.reasoning,
+                        'captain': {'name': wp.captain.get('name'), 'xp': wp.captain.get('xp', 0)} if wp.captain else None,
+                        'differential_captain': {'name': wp.differential_captain.get('name'),
+                                                 'xp': wp.differential_captain.get('xp', 0),
+                                                 'eo': wp.differential_captain.get('eo', 0)} if wp.differential_captain else None,
+                        'formation': wp.formation,
+                    }
+                    scenario_weekly_plans.append(plan_dict)
+
+                scenarios_summary[scenario_name] = {
+                    'num_transfers': result.num_transfers,
+                    'hit_cost': result.hit_cost,
+                    'expected_points': result.expected_points,
+                    'baseline_xp': result.baseline_xp,
+                    'net_gain': round(result.expected_points - result.baseline_xp, 1),
+                    'weekly_plans': scenario_weekly_plans,
+                    'backup_transfers': result.backup_transfers,
+                    'sell_rebuy_warnings': result.sell_rebuy_warnings,
+                    'price_alerts': result.price_alerts,
+                }
+
+        # Format weekly plans for main result (for backward compatibility)
+        weekly_plans_formatted = []
+        for wp in main_result.weekly_plans:
+            plan_dict = {
+                'gameweek': wp.gameweek,
+                'is_hold': wp.is_hold,
+                'transfers_in': [{'name': p.get('name'), 'position': p.get('position'),
+                                  'team': p.get('team'), 'xp': p.get('xp', [0]),
+                                  'sell_price': p.get('sell_price', p.get('price', 0)),
+                                  'buy_price': p.get('buy_price', p.get('price', 0))}
+                                 for p in wp.transfers_in],
+                'transfers_out': [{'name': p.get('name'), 'position': p.get('position'),
+                                   'team': p.get('team'), 'xp': p.get('xp', [0]),
+                                   'sell_price': p.get('sell_price', p.get('price', 0)),
+                                   'buy_price': p.get('buy_price', p.get('price', 0))}
+                                  for p in wp.transfers_out],
+                'ft_available': wp.ft_available,
+                'ft_used': wp.ft_used,
+                'ft_remaining': wp.ft_remaining,
+                'hit_cost': wp.hit_cost,
+                'expected_xp': wp.expected_xp,
+                'confidence': wp.confidence,
+                'reasoning': wp.reasoning,
+                'captain': {'name': wp.captain.get('name'), 'xp': wp.captain.get('xp', 0)} if wp.captain else None,
+                'differential_captain': {'name': wp.differential_captain.get('name'),
+                                         'xp': wp.differential_captain.get('xp', 0),
+                                         'eo': wp.differential_captain.get('eo', 0)} if wp.differential_captain else None,
+                'formation': wp.formation,
+            }
+            weekly_plans_formatted.append(plan_dict)
+
+        # Format transfer sequence
+        transfer_sequence = []
+        for action in main_result.transfer_sequence:
+            transfer_sequence.append({
+                'gameweek': action.gameweek,
+                'out': action.player_out.get('name'),
+                'out_position': action.player_out.get('position'),
+                'in': action.player_in.get('name'),
+                'in_position': action.player_in.get('position'),
+                'expected_gain': action.expected_gain,
+                'cost': action.cost,
+                'reasoning': action.reasoning,
+                'is_sell_rebuy': action.is_sell_rebuy,
+                'price_alert': action.price_alert,
+            })
+
+        return {
+            'status': main_result.status,
+            'message': main_result.message,
+            'scenarios': scenarios_summary,
+            'recommended': recommended,
+            'transfers_out': main_result.transfers_out,
+            'transfers_in': main_result.transfers_in,
+            'starting_xi': main_result.starting_xi,
+            'bench': main_result.bench,
+            'formation': main_result.formation,
+            'captain': main_result.captain,
+            'hit_cost': main_result.hit_cost,
+            'num_transfers': main_result.num_transfers,
+            'expected_points': main_result.expected_points,
+            'baseline_xp': main_result.baseline_xp,
+            'per_gw_xp': main_result.per_gw_xp,
+            'weekly_plans': weekly_plans_formatted,
+            'transfer_sequence': transfer_sequence,
+            'confidence_per_gw': main_result.confidence_per_gw,
+            'watchlist': multi_result.watchlist,
+            'solver_time': main_result.solver_time,
+        }
 
     def _analyze_squad_fixtures(self, squad_analysis: List[Dict], 
                                  num_weeks: int) -> Dict[int, Dict]:
@@ -629,52 +785,58 @@ class TransferStrategyPlanner:
         if all_ids:
             predictions = self._predict_multiple_gws(all_ids, num_gws=5)
         
-        # Match transfers (N out, M in - we try to pair them for display)
-        # Since logic replaces X with Y, we just list them.
-        
-        # We need to pair them arbitrarily if counts are equal, or just list
-        # For the visualization "Out -> In", we need pairs.
-        # If lengths differ, we'll use placeholder or "None"
-        
-        max_len = max(len(transfers_out_list), len(transfers_in_list))
-        
-        for i in range(max_len):
-            p_out = transfers_out_list[i] if i < len(transfers_out_list) else None
-            p_in = transfers_in_list[i] if i < len(transfers_in_list) else None
-            
-            name_out = p_out.get('web_name', p_out.get('name', 'Unknown')) if p_out else '-'
-            pos_out = p_out.get('position', 'UNK') if p_out else ''
-            id_out = p_out.get('id') if p_out else None
-            
-            name_in = p_in.get('web_name', p_in.get('name', 'Unknown')) if p_in else '-'
-            pos_in = p_in.get('position', 'UNK') if p_in else ''
-            id_in = p_in.get('id') if p_in else None
-            
-            # Gain stats
-            gain = 0
-            if id_out and id_in:
-                pred_out = predictions.get(id_out, {}).get('cumulative', 0)
-                pred_in = predictions.get(id_in, {}).get('cumulative', 0)
-                gain = round(pred_in - pred_out, 1)
-            elif id_in:
-                gain = round(predictions.get(id_in, {}).get('cumulative', 0), 1)
-                
-            reason = f"MIP optimal move"
-            if gain > 0:
-                reason += f" (+{gain} xP)"
-            
-            planned.append({
-                'gameweek': transfer_gw,
-                'action': 'transfer',
-                'out': name_out,
-                'out_position': pos_out,
-                'in': name_in,
-                'in_position': pos_in,
-                'expected_gain': max(0.1, gain),
-                'reasoning': reason,
-                'priority': 'high',
-                'take_hit': False # Solver handled cost
-            })
+        # Match transfers by position - FPL requires transfers within same position
+        # Group by position first, then match within each group
+        from collections import defaultdict
+
+        out_by_pos = defaultdict(list)
+        in_by_pos = defaultdict(list)
+
+        for p in transfers_out_list:
+            pos = p.get('position', 'UNK')
+            out_by_pos[pos].append(p)
+
+        for p in transfers_in_list:
+            pos = p.get('position', 'UNK')
+            in_by_pos[pos].append(p)
+
+        # Match within each position
+        for pos in ['GKP', 'DEF', 'MID', 'FWD']:
+            outs = out_by_pos.get(pos, [])
+            ins = in_by_pos.get(pos, [])
+
+            for p_out, p_in in zip(outs, ins):
+                name_out = p_out.get('web_name', p_out.get('name', 'Unknown'))
+                id_out = p_out.get('id')
+
+                name_in = p_in.get('web_name', p_in.get('name', 'Unknown'))
+                id_in = p_in.get('id')
+
+                # Gain stats
+                gain = 0
+                if id_out and id_in:
+                    pred_out = predictions.get(id_out, {}).get('cumulative', 0)
+                    pred_in = predictions.get(id_in, {}).get('cumulative', 0)
+                    gain = round(pred_in - pred_out, 1)
+                elif id_in:
+                    gain = round(predictions.get(id_in, {}).get('cumulative', 0), 1)
+
+                reason = f"MIP optimal move"
+                if gain > 0:
+                    reason += f" (+{gain} xP)"
+
+                planned.append({
+                    'gameweek': transfer_gw,
+                    'action': 'transfer',
+                    'out': name_out,
+                    'out_position': pos,
+                    'in': name_in,
+                    'in_position': pos,
+                    'expected_gain': max(0.1, gain),
+                    'reasoning': reason,
+                    'priority': 'high',
+                    'take_hit': False  # Solver handled cost
+                })
             
         return planned
 
@@ -877,8 +1039,846 @@ class TransferStrategyPlanner:
         # Sort by position
         position_order = {'GKP': 0, 'DEF': 1, 'MID': 2, 'FWD': 3}
         heatmap_data.sort(key=lambda x: position_order.get(x['position'], 4))
-        
+
         return heatmap_data
+
+    def analyze_chip_opportunities(
+        self,
+        squad_analysis: List[Dict],
+        chips_used: List[Dict],
+        gw_history: List[Dict],
+        ml_position: Dict = None
+    ) -> Dict:
+        """Analyze chip usage opportunities for the current squad state.
+
+        Generates personalized chip recommendations based on:
+        - Squad issues (injuries, suspensions, price drops)
+        - Fixture difficulty and BGW/DGW calendar
+        - Mini-league position (chasing vs protecting)
+        - Opportunity cost vs optimal free transfers
+
+        Args:
+            squad_analysis: Player analysis data for current squad
+            chips_used: List of chips already used this season
+            gw_history: Gameweek history for the team
+            ml_position: Mini-league position data (optional)
+
+        Returns:
+            Dict with chip analysis for each available chip
+        """
+        from simulation.state import CHIP_RESET_GW, CHIPS_PER_HALF
+        from .data_fetcher import get_bgw_dgw_gameweeks
+
+        current_gw = len(gw_history) if gw_history else 1
+        first_half = current_gw < CHIP_RESET_GW
+        half_label = 'first' if first_half else 'second'
+
+        # Build chip usage map
+        used_chips = {c.get('name', ''): c.get('event', 0) for c in chips_used}
+
+        # Filter chips used in current half
+        if first_half:
+            chips_used_this_half = [c for c in chips_used if c.get('event', 0) < CHIP_RESET_GW]
+        else:
+            chips_used_this_half = [c for c in chips_used if c.get('event', 0) >= CHIP_RESET_GW]
+
+        chips_remaining = CHIPS_PER_HALF - len(chips_used_this_half)
+
+        # Get squad issues
+        squad_issues = self.fetcher.get_squad_issues()
+
+        # Get BGW/DGW data
+        try:
+            bgw_dgw_data = get_bgw_dgw_gameweeks(use_cache=True, session_cache=self.fetcher.cache)
+            bgws = [b for b in bgw_dgw_data.get('bgw', []) if b.get('gw', 0) > current_gw]
+            dgws = [d for d in bgw_dgw_data.get('dgw', []) if d.get('gw', 0) > current_gw]
+        except Exception:
+            bgws, dgws = [], []
+
+        # Analyze ML position context
+        ml_context = self._analyze_ml_context(ml_position) if ml_position else {
+            'strategy': 'balanced',
+            'points_gap': 0,
+            'recommendation': 'Play for optimal expected value'
+        }
+
+        # Build analysis for each chip
+        analysis = {
+            'current_gw': current_gw,
+            'half': half_label,
+            'chips_remaining': chips_remaining,
+            'chips_remaining_display': f"{chips_remaining}/{CHIPS_PER_HALF}",
+            'squad_issues': squad_issues,
+            'ml_context': ml_context,
+            'bgws': bgws[:3],
+            'dgws': dgws[:3],
+            'deadline_warning': None,
+            'chips': {}
+        }
+
+        # Deadline warning for first half
+        if first_half and current_gw >= 15 and chips_remaining > 0:
+            gws_left = CHIP_RESET_GW - current_gw
+            analysis['deadline_warning'] = {
+                'chips_expiring': chips_remaining,
+                'gws_remaining': gws_left,
+                'message': f"{chips_remaining} unused chip(s) will expire at GW{CHIP_RESET_GW}. {gws_left} GWs remaining to use them."
+            }
+
+        # Analyze Wildcard
+        wc_analysis = self._analyze_wildcard(
+            squad_analysis, squad_issues, used_chips, current_gw, first_half, ml_context
+        )
+        analysis['chips']['wildcard'] = wc_analysis
+
+        # Analyze Free Hit
+        fh_analysis = self._analyze_free_hit(
+            squad_analysis, squad_issues, used_chips, current_gw, first_half, bgws
+        )
+        analysis['chips']['freehit'] = fh_analysis
+
+        # Analyze Bench Boost
+        bb_analysis = self._analyze_bench_boost(
+            squad_analysis, used_chips, current_gw, dgws
+        )
+        analysis['chips']['bboost'] = bb_analysis
+
+        # Analyze Triple Captain
+        tc_analysis = self._analyze_triple_captain(
+            squad_analysis, used_chips, current_gw, dgws
+        )
+        analysis['chips']['3xc'] = tc_analysis
+
+        # Identify chip synergies
+        analysis['synergies'] = self._identify_chip_synergies(
+            analysis['chips'], current_gw, bgws, dgws, first_half
+        )
+
+        # Build trigger list if no urgent chip needed
+        analysis['triggers'] = self._build_chip_triggers(analysis['chips'], squad_issues)
+
+        return analysis
+
+    def _analyze_ml_context(self, ml_position: Dict) -> Dict:
+        """Analyze mini-league position to inform chip strategy."""
+        if not ml_position:
+            return {'strategy': 'balanced', 'points_gap': 0, 'recommendation': 'Play for optimal expected value'}
+
+        user_points = ml_position.get('user_points', 0)
+        leader_points = ml_position.get('leader_points', 0)
+        user_rank = ml_position.get('user_rank', 1)
+        total_managers = ml_position.get('total_managers', 1)
+
+        points_gap = leader_points - user_points
+
+        if user_rank == 1:
+            # Leading
+            if points_gap == 0:
+                return {
+                    'strategy': 'protect',
+                    'points_gap': 0,
+                    'recommendation': 'Protect lead - prefer template/safe picks, avoid unnecessary risks'
+                }
+        elif points_gap > 100:
+            # Far behind
+            return {
+                'strategy': 'aggressive',
+                'points_gap': points_gap,
+                'recommendation': f'{points_gap} pts behind leader - consider differential picks and aggressive chip timing'
+            }
+        elif points_gap > 50:
+            # Moderately behind
+            return {
+                'strategy': 'chase',
+                'points_gap': points_gap,
+                'recommendation': f'{points_gap} pts behind - balance risk with reward, consider chip timing edges'
+            }
+        else:
+            # Close race
+            return {
+                'strategy': 'balanced',
+                'points_gap': points_gap,
+                'recommendation': f'Close to leader ({points_gap} pts) - play optimal strategy, avoid costly mistakes'
+            }
+
+        return {'strategy': 'balanced', 'points_gap': points_gap, 'recommendation': 'Play for optimal expected value'}
+
+    def _analyze_wildcard(
+        self, squad_analysis, squad_issues, used_chips, current_gw, first_half, ml_context
+    ) -> Dict:
+        """Analyze Wildcard chip opportunity."""
+        chip_name = 'wildcard'
+
+        # Check if already used this half
+        if chip_name in used_chips:
+            used_gw = used_chips[chip_name]
+            from simulation.state import CHIP_RESET_GW
+            used_this_half = (first_half and used_gw < CHIP_RESET_GW) or (not first_half and used_gw >= CHIP_RESET_GW)
+            if used_this_half:
+                return {
+                    'status': 'used',
+                    'used_gw': used_gw,
+                    'available': False,
+                    'recommendation': None,
+                    'issues_addressed': [],
+                    'opportunity_cost': None
+                }
+
+        # Count issues WC would address
+        issues_addressed = []
+        if squad_issues['injuries']:
+            issues_addressed.extend([f"{p['name']} injured" for p in squad_issues['injuries']])
+        if squad_issues['suspension_risk']:
+            issues_addressed.extend([f"{p['name']} {p['yellows']} yellows" for p in squad_issues['suspension_risk'] if p['risk_level'] == 'high'])
+        if squad_issues['price_drops']:
+            issues_addressed.extend([f"{p['name']} price drop" for p in squad_issues['price_drops'][:2]])
+
+        # Calculate opportunity cost (simplified - full version in Phase 2)
+        total_issues = len(issues_addressed)
+        estimated_points_loss = total_issues * 3  # Rough estimate: 3 pts per issue per week
+
+        # Build recommendation
+        urgency = 'low'
+        recommendation = None
+
+        if total_issues >= 4:
+            urgency = 'high'
+            recommendation = f"Strong WC candidate - {total_issues} issues to address"
+        elif total_issues >= 2:
+            urgency = 'medium'
+            recommendation = f"Consider WC - {total_issues} issues affecting squad"
+        else:
+            # Generic timing advice
+            if first_half:
+                if current_gw < 7:
+                    recommendation = "Save for GW7-9 fixture swing period"
+                elif current_gw >= 15:
+                    recommendation = f"Use before GW20 - doesn't carry over! ({20 - current_gw} GWs left)"
+                    urgency = 'medium'
+            else:
+                if current_gw < 30:
+                    recommendation = "Target GW30-32 for run-in preparation"
+                else:
+                    recommendation = "Use soon for season run-in optimization"
+
+        # Adjust for ML context
+        if ml_context['strategy'] == 'aggressive' and total_issues >= 2:
+            recommendation += " - consider differential targets"
+        elif ml_context['strategy'] == 'protect':
+            recommendation += " - prioritize template players"
+
+        return {
+            'status': 'available',
+            'available': True,
+            'urgency': urgency,
+            'recommendation': recommendation,
+            'issues_addressed': issues_addressed[:5],  # Limit to 5
+            'opportunity_cost': {
+                'estimated_weekly_loss': estimated_points_loss,
+                'description': f"~{estimated_points_loss} pts/week from unaddressed issues" if estimated_points_loss > 0 else None
+            }
+        }
+
+    def _analyze_free_hit(
+        self, squad_analysis, squad_issues, used_chips, current_gw, first_half, bgws
+    ) -> Dict:
+        """Analyze Free Hit chip opportunity."""
+        chip_name = 'freehit'
+
+        if chip_name in used_chips:
+            used_gw = used_chips[chip_name]
+            from simulation.state import CHIP_RESET_GW
+            used_this_half = (first_half and used_gw < CHIP_RESET_GW) or (not first_half and used_gw >= CHIP_RESET_GW)
+            if used_this_half:
+                return {
+                    'status': 'used',
+                    'used_gw': used_gw,
+                    'available': False,
+                    'recommendation': None,
+                    'target_gw': None
+                }
+
+        # Find best FH target
+        target_gw = None
+        recommendation = None
+        urgency = 'low'
+
+        if bgws:
+            next_bgw = bgws[0]
+            bgw_gw = next_bgw.get('gw', 0)
+            teams_missing = next_bgw.get('teams_missing', 0)
+
+            # Count how many of our players are affected
+            # (simplified - would need fixture data in full implementation)
+            if teams_missing >= 6:
+                target_gw = bgw_gw
+                urgency = 'high' if (bgw_gw - current_gw) <= 3 else 'medium'
+                recommendation = f"Target BGW{bgw_gw} - {teams_missing} teams blanking"
+
+        if not recommendation:
+            if first_half:
+                recommendation = "Save for next confirmed BGW"
+            else:
+                recommendation = "Use on BGW or DGW with significant team gaps"
+
+        return {
+            'status': 'available',
+            'available': True,
+            'urgency': urgency,
+            'recommendation': recommendation,
+            'target_gw': target_gw,
+            'bgw_targets': [{'gw': b.get('gw'), 'teams_missing': b.get('teams_missing', 0)} for b in bgws[:2]]
+        }
+
+    def _analyze_bench_boost(self, squad_analysis, used_chips, current_gw, dgws) -> Dict:
+        """Analyze Bench Boost chip opportunity."""
+        chip_name = 'bboost'
+        first_half = current_gw < 20
+
+        if chip_name in used_chips:
+            used_gw = used_chips[chip_name]
+            from simulation.state import CHIP_RESET_GW
+            used_this_half = (first_half and used_gw < CHIP_RESET_GW) or (not first_half and used_gw >= CHIP_RESET_GW)
+            if used_this_half:
+                return {
+                    'status': 'used',
+                    'used_gw': used_gw,
+                    'available': False,
+                    'recommendation': None
+                }
+
+        # Analyze bench quality
+        bench_players = [p for p in squad_analysis if p.get('position_in_squad', 0) > 11]
+
+        recommendation = None
+        urgency = 'low'
+        target_gw = None
+
+        if dgws:
+            next_dgw = dgws[0]
+            dgw_gw = next_dgw.get('gw', 0)
+            teams_doubled = next_dgw.get('teams_doubled', 0)
+
+            if teams_doubled >= 8:
+                target_gw = dgw_gw
+                urgency = 'medium' if (dgw_gw - current_gw) <= 5 else 'low'
+                recommendation = f"Target DGW{dgw_gw} - {teams_doubled} teams doubled. Build bench value beforehand."
+
+        if not recommendation:
+            recommendation = "Target DGW34-37 historically. Build bench 2-3 weeks before."
+
+        return {
+            'status': 'available',
+            'available': True,
+            'urgency': urgency,
+            'recommendation': recommendation,
+            'target_gw': target_gw,
+            'bench_players': [{'name': p.get('name'), 'position': p.get('position')} for p in bench_players],
+            'dgw_targets': [{'gw': d.get('gw'), 'teams_doubled': d.get('teams_doubled', 0)} for d in dgws[:2]]
+        }
+
+    def _analyze_triple_captain(self, squad_analysis, used_chips, current_gw, dgws) -> Dict:
+        """Analyze Triple Captain chip opportunity."""
+        chip_name = '3xc'
+        first_half = current_gw < 20
+
+        if chip_name in used_chips:
+            used_gw = used_chips[chip_name]
+            from simulation.state import CHIP_RESET_GW
+            used_this_half = (first_half and used_gw < CHIP_RESET_GW) or (not first_half and used_gw >= CHIP_RESET_GW)
+            if used_this_half:
+                return {
+                    'status': 'used',
+                    'used_gw': used_gw,
+                    'available': False,
+                    'recommendation': None
+                }
+
+        # Find premium captain options (price > 10m)
+        premiums = []
+        for p in squad_analysis:
+            stats = p.get('stats', {})
+            price = stats.get('now_cost', 0) / 10
+            if price >= 10.0:
+                premiums.append({
+                    'name': p.get('name'),
+                    'price': price,
+                    'form': float(stats.get('form', 0) or 0),
+                    'position': p.get('position')
+                })
+
+        recommendation = None
+        urgency = 'low'
+        target_gw = None
+
+        if dgws:
+            next_dgw = dgws[0]
+            dgw_gw = next_dgw.get('gw', 0)
+
+            if premiums:
+                top_premium = max(premiums, key=lambda x: x['form'])
+                target_gw = dgw_gw
+                urgency = 'medium' if (dgw_gw - current_gw) <= 3 else 'low'
+                recommendation = f"Target DGW{dgw_gw} with {top_premium['name']} if form holds"
+            else:
+                recommendation = f"Target DGW{dgw_gw} - acquire a premium (Haaland/Salah) first"
+
+        if not recommendation:
+            recommendation = "Wait for DGW with premium attacker in strong form"
+
+        return {
+            'status': 'available',
+            'available': True,
+            'urgency': urgency,
+            'recommendation': recommendation,
+            'target_gw': target_gw,
+            'premium_options': premiums[:3],
+            'dgw_targets': [{'gw': d.get('gw'), 'teams_doubled': d.get('teams_doubled', 0)} for d in dgws[:2]]
+        }
+
+    def _identify_chip_synergies(self, chips, current_gw, bgws, dgws, first_half) -> List[Dict]:
+        """Identify beneficial chip combinations."""
+        synergies = []
+
+        # WC before BB synergy (build BB bench with WC)
+        if chips.get('wildcard', {}).get('available') and chips.get('bboost', {}).get('available'):
+            if dgws:
+                dgw_gw = dgws[0].get('gw', 0)
+                if dgw_gw > current_gw + 2:  # At least 2 weeks before DGW
+                    synergies.append({
+                        'chips': ['wildcard', 'bboost'],
+                        'strategy': f"WC in GW{dgw_gw - 2} to build BB-ready bench, then BB in DGW{dgw_gw}",
+                        'value': 'high'
+                    })
+
+        # FH saves squad for following week
+        if chips.get('freehit', {}).get('available') and chips.get('wildcard', {}).get('available'):
+            if bgws:
+                bgw_gw = bgws[0].get('gw', 0)
+                synergies.append({
+                    'chips': ['freehit', 'wildcard'],
+                    'strategy': f"FH on BGW{bgw_gw} preserves squad for WC planning",
+                    'value': 'medium'
+                })
+
+        # First half deadline synergy
+        if first_half and current_gw >= 15:
+            from simulation.state import CHIP_RESET_GW
+            remaining = CHIP_RESET_GW - current_gw
+            if chips.get('wildcard', {}).get('available') and chips.get('bboost', {}).get('available'):
+                synergies.append({
+                    'chips': ['wildcard', 'bboost'],
+                    'strategy': f"Use WC then BB before GW{CHIP_RESET_GW} - {remaining} GWs to use both!",
+                    'value': 'critical'
+                })
+
+        return synergies
+
+    def _build_chip_triggers(self, chips, squad_issues) -> List[str]:
+        """Build list of triggers that would change chip recommendations."""
+        triggers = []
+
+        # If no high urgency chips, show what would trigger them
+        high_urgency = any(c.get('urgency') == 'high' for c in chips.values() if isinstance(c, dict))
+
+        if not high_urgency:
+            if squad_issues['total_issues'] < 4:
+                triggers.append(f"2+ more injuries would trigger Wildcard consideration (currently {len(squad_issues['injuries'])})")
+            triggers.append("DGW announcement would trigger BB/TC planning")
+            triggers.append("BGW announcement would trigger FH consideration")
+            if squad_issues['price_drops']:
+                triggers.append(f"Watch price drops on: {', '.join([p['name'] for p in squad_issues['price_drops'][:3]])}")
+
+        return triggers
+
+    # =========================================================================
+    # PHASE 2: Optimizer-based chip projections
+    # =========================================================================
+
+    def calculate_bb_projections(
+        self, squad_analysis: List[Dict], dgws: List[Dict], num_gws: int = 5
+    ) -> Dict:
+        """Calculate projected bench points for upcoming DGWs.
+
+        Args:
+            squad_analysis: Current squad analysis data
+            dgws: List of upcoming DGW dicts with 'gw' and 'teams_doubled'
+            num_gws: Number of gameweeks to project
+
+        Returns:
+            Dict with BB projections per DGW
+        """
+        if not dgws:
+            return {'projections': [], 'best_dgw': None, 'recommendation': 'No DGWs detected yet'}
+
+        # Get bench players (positions 12-15)
+        bench_players = [p for p in squad_analysis if p.get('position_in_squad', 0) > 11]
+
+        if not bench_players:
+            return {'projections': [], 'best_dgw': None, 'recommendation': 'No bench data available'}
+
+        # Get predictions for bench players
+        bench_ids = [p.get('player_id') for p in bench_players if p.get('player_id')]
+
+        try:
+            # Ensure predictor is trained
+            if not self.predictor.is_trained:
+                self._ensure_predictor_trained()
+
+            predictions = self._predict_multiple_gws(bench_ids, num_gws)
+        except Exception as e:
+            return {'projections': [], 'best_dgw': None, 'recommendation': f'Prediction failed: {str(e)[:50]}'}
+
+        current_gw = self.fetcher.get_current_gameweek()
+        projections = []
+
+        for dgw in dgws[:3]:  # Limit to next 3 DGWs
+            dgw_gw = dgw.get('gw', 0)
+            if dgw_gw <= current_gw:
+                continue
+
+            gw_offset = dgw_gw - current_gw - 1  # 0-indexed offset
+
+            # Calculate projected bench points for this DGW
+            bench_points = []
+            for player in bench_players:
+                pid = player.get('player_id')
+                name = player.get('name', 'Unknown')
+                position = player.get('position', 'UNK')
+
+                player_pred = predictions.get(pid, {})
+                gw_predictions = player_pred.get('gw_predictions', [])
+
+                # Get projection for the DGW (doubled because DGW)
+                if gw_offset < len(gw_predictions):
+                    base_pts = gw_predictions[gw_offset]
+                    # DGW doubles the points expectation (roughly)
+                    dgw_pts = base_pts * 1.8  # Slightly less than 2x due to rotation risk
+                else:
+                    dgw_pts = 4.0  # Default estimate
+
+                bench_points.append({
+                    'name': name,
+                    'position': position,
+                    'projected_pts': round(dgw_pts, 1)
+                })
+
+            total_bench_pts = sum(p['projected_pts'] for p in bench_points)
+
+            projections.append({
+                'gw': dgw_gw,
+                'teams_doubled': dgw.get('teams_doubled', 0),
+                'bench_players': bench_points,
+                'total_projected': round(total_bench_pts, 1),
+                'recommendation': self._bb_recommendation(total_bench_pts, dgw.get('teams_doubled', 0))
+            })
+
+        # Find best DGW
+        best = max(projections, key=lambda x: x['total_projected']) if projections else None
+
+        return {
+            'projections': projections,
+            'best_dgw': best,
+            'recommendation': f"Best BB opportunity: DGW{best['gw']} (~{best['total_projected']} pts)" if best else 'No suitable DGW found'
+        }
+
+    def _bb_recommendation(self, total_pts: float, teams_doubled: int) -> str:
+        """Generate BB recommendation based on projected points."""
+        if total_pts >= 20 and teams_doubled >= 10:
+            return "Excellent BB opportunity"
+        elif total_pts >= 15 and teams_doubled >= 8:
+            return "Good BB opportunity"
+        elif total_pts >= 10:
+            return "Decent BB opportunity - consider building bench first"
+        else:
+            return "Weak BB opportunity - build bench value first"
+
+    def rank_tc_options(
+        self, squad_analysis: List[Dict], dgws: List[Dict], num_gws: int = 5
+    ) -> Dict:
+        """Rank premium players by projected DGW points for TC.
+
+        Args:
+            squad_analysis: Current squad analysis data
+            dgws: List of upcoming DGW dicts
+            num_gws: Number of gameweeks to project
+
+        Returns:
+            Dict with TC rankings per DGW
+        """
+        if not dgws:
+            return {'rankings': [], 'best_option': None, 'recommendation': 'No DGWs detected yet'}
+
+        # Get premium players (price >= 10m) and regular captain candidates
+        premiums = []
+        for p in squad_analysis:
+            stats = p.get('stats', {})
+            price = stats.get('now_cost', 0) / 10
+            form = float(stats.get('form', 0) or 0)
+            position = p.get('position', 'UNK')
+
+            # Include premiums and high-form attackers/midfielders
+            if price >= 10.0 or (position in ['MID', 'FWD'] and form >= 5.0):
+                premiums.append({
+                    'player_id': p.get('player_id'),
+                    'name': p.get('name'),
+                    'position': position,
+                    'price': price,
+                    'form': form
+                })
+
+        if not premiums:
+            return {'rankings': [], 'best_option': None, 'recommendation': 'No premium players in squad'}
+
+        premium_ids = [p['player_id'] for p in premiums if p.get('player_id')]
+
+        try:
+            if not self.predictor.is_trained:
+                self._ensure_predictor_trained()
+
+            predictions = self._predict_multiple_gws(premium_ids, num_gws)
+        except Exception as e:
+            return {'rankings': [], 'best_option': None, 'recommendation': f'Prediction failed: {str(e)[:50]}'}
+
+        current_gw = self.fetcher.get_current_gameweek()
+        rankings = []
+
+        for dgw in dgws[:3]:
+            dgw_gw = dgw.get('gw', 0)
+            if dgw_gw <= current_gw:
+                continue
+
+            gw_offset = dgw_gw - current_gw - 1
+
+            # Calculate projected TC points for each premium
+            tc_options = []
+            for player in premiums:
+                pid = player.get('player_id')
+                player_pred = predictions.get(pid, {})
+                gw_predictions = player_pred.get('gw_predictions', [])
+
+                if gw_offset < len(gw_predictions):
+                    base_pts = gw_predictions[gw_offset]
+                    # DGW + TC = 3x base (roughly, with DGW bonus)
+                    dgw_pts = base_pts * 1.8  # DGW expectation
+                    tc_pts = dgw_pts * 3  # TC multiplier
+                else:
+                    tc_pts = 15.0  # Default
+
+                tc_options.append({
+                    'name': player['name'],
+                    'position': player['position'],
+                    'price': player['price'],
+                    'form': player['form'],
+                    'projected_pts': round(base_pts, 1),
+                    'tc_projected': round(tc_pts, 1)
+                })
+
+            # Sort by TC projected points
+            tc_options.sort(key=lambda x: x['tc_projected'], reverse=True)
+
+            rankings.append({
+                'gw': dgw_gw,
+                'teams_doubled': dgw.get('teams_doubled', 0),
+                'options': tc_options[:5],  # Top 5
+                'best': tc_options[0] if tc_options else None
+            })
+
+        # Find best overall TC option
+        best_option = None
+        best_pts = 0
+        for r in rankings:
+            if r.get('best') and r['best']['tc_projected'] > best_pts:
+                best_pts = r['best']['tc_projected']
+                best_option = {**r['best'], 'gw': r['gw']}
+
+        return {
+            'rankings': rankings,
+            'best_option': best_option,
+            'recommendation': f"Best TC: {best_option['name']} in DGW{best_option['gw']} (~{best_option['tc_projected']} pts)" if best_option else 'No suitable TC option'
+        }
+
+    def generate_fh_squad_suggestion(
+        self, bgws: List[Dict], budget: float = None
+    ) -> Dict:
+        """Generate suggested Free Hit squad for upcoming BGW.
+
+        Args:
+            bgws: List of upcoming BGW dicts
+            budget: Team value budget (defaults to current team value)
+
+        Returns:
+            Dict with FH squad suggestion
+        """
+        if not bgws:
+            return {'squad': None, 'recommendation': 'No BGWs detected yet'}
+
+        target_bgw = bgws[0]
+        bgw_gw = target_bgw.get('gw', 0)
+
+        if budget is None:
+            budget = self.fetcher.get_team_value() + self.fetcher.get_bank()
+
+        try:
+            # Use existing FreeHitOptimizer
+            fh_optimizer = FreeHitOptimizer(
+                players_df=self.fetcher.players_df,
+                total_budget=budget,
+                predictions=None,  # Will use form-based scoring
+                teams_data=self.fetcher.bootstrap_data.get('teams', []),
+                fixtures_data=self.fetcher.bootstrap_data.get('fixtures', []),
+                current_gw=self.fetcher.get_current_gameweek(),
+                target_gw=bgw_gw
+            )
+
+            result = fh_optimizer.build_squad()
+
+            if result and result.get('squad'):
+                # Extract budget info (FreeHitOptimizer uses different key names)
+                budget_info = result.get('budget', {})
+                total_cost = budget_info.get('spent', 0)
+
+                # Calculate projected points from starting XI
+                starting_xi = result.get('starting_xi', [])
+                projected_pts = sum(p.get('xp_5gw', p.get('score', 0)) for p in starting_xi)
+
+                return {
+                    'target_gw': bgw_gw,
+                    'teams_missing': target_bgw.get('teams_missing', 0),
+                    'squad': result['squad'],
+                    'starting_xi': starting_xi,
+                    'bench': result.get('bench', []),
+                    'formation': result.get('formation', ''),
+                    'total_cost': total_cost,
+                    'projected_pts': round(projected_pts, 1),
+                    'recommendation': f"FH squad for BGW{bgw_gw}: {result.get('formation', '')} formation, ~{projected_pts:.1f} pts expected"
+                }
+            else:
+                return {'squad': None, 'recommendation': 'FH squad optimization failed'}
+
+        except Exception as e:
+            return {'squad': None, 'recommendation': f'FH optimization error: {str(e)[:50]}'}
+
+    def generate_wc_squad_suggestion(self, budget: float = None) -> Dict:
+        """Generate suggested Wildcard squad.
+
+        Args:
+            budget: Team value budget (defaults to current team value + bank)
+
+        Returns:
+            Dict with WC squad suggestion
+        """
+        if budget is None:
+            budget = self.fetcher.get_team_value() + self.fetcher.get_bank()
+
+        try:
+            # Get predictions for all top players
+            top_players = self.fetcher.players_df.nlargest(200, 'total_points')['id'].tolist()
+
+            if self.predictor.is_trained:
+                predictions = self._predict_multiple_gws(top_players, num_gws=5)
+            else:
+                predictions = {}
+
+            # Use existing WildcardOptimizer
+            wc_optimizer = WildcardOptimizer(
+                players_df=self.fetcher.players_df,
+                total_budget=budget,
+                predictions=predictions,
+                teams_data=self.fetcher.bootstrap_data.get('teams', []),
+                fixtures_data=self.fetcher.bootstrap_data.get('fixtures', []),
+                current_gw=self.fetcher.get_current_gameweek()
+            )
+
+            result = wc_optimizer.build_squad()
+
+            if result and result.get('squad'):
+                # Extract budget info (WildcardOptimizer uses different key names)
+                budget_info = result.get('budget', {})
+                total_cost = budget_info.get('spent', 0)
+                budget_remaining = budget_info.get('remaining', 0)
+
+                # Calculate projected points from starting XI
+                starting_xi = result.get('starting_xi', [])
+                projected_pts = sum(p.get('xp_5gw', 0) for p in starting_xi)
+
+                return {
+                    'squad': result['squad'],
+                    'starting_xi': starting_xi,
+                    'bench': result.get('bench', []),
+                    'formation': result.get('formation', ''),
+                    'total_cost': total_cost,
+                    'projected_pts': round(projected_pts, 1),
+                    'budget_remaining': round(budget_remaining, 1),
+                    'recommendation': f"WC target: {result.get('formation', '')} formation, {total_cost:.1f}m used, ~{projected_pts:.1f} 5-GW pts"
+                }
+            else:
+                return {'squad': None, 'recommendation': 'WC squad optimization failed'}
+
+        except Exception as e:
+            return {'squad': None, 'recommendation': f'WC optimization error: {str(e)[:50]}'}
+
+    def get_phase2_chip_analysis(
+        self, squad_analysis: List[Dict], chips_used: List[Dict], gw_history: List[Dict]
+    ) -> Dict:
+        """Get comprehensive Phase 2 chip analysis with optimizer projections.
+
+        This is the main entry point for Phase 2 chip analysis.
+
+        Args:
+            squad_analysis: Current squad analysis
+            chips_used: List of chips already used
+            gw_history: Gameweek history
+
+        Returns:
+            Dict with all Phase 2 projections
+        """
+        from .data_fetcher import get_bgw_dgw_gameweeks
+
+        current_gw = len(gw_history) if gw_history else self.fetcher.get_current_gameweek()
+
+        # Get BGW/DGW data
+        try:
+            bgw_dgw_data = get_bgw_dgw_gameweeks(use_cache=True, session_cache=self.fetcher.cache)
+            bgws = [b for b in bgw_dgw_data.get('bgw', []) if b.get('gw', 0) > current_gw]
+            dgws = [d for d in bgw_dgw_data.get('dgw', []) if d.get('gw', 0) > current_gw]
+        except Exception:
+            bgws, dgws = [], []
+
+        # Build used chips map for current half
+        from simulation.state import CHIP_RESET_GW
+        first_half = current_gw < CHIP_RESET_GW
+        if first_half:
+            chips_used_this_half = {c.get('name', ''): c.get('event', 0) for c in chips_used if c.get('event', 0) < CHIP_RESET_GW}
+        else:
+            chips_used_this_half = {c.get('name', ''): c.get('event', 0) for c in chips_used if c.get('event', 0) >= CHIP_RESET_GW}
+
+        result = {
+            'bb_projections': None,
+            'tc_rankings': None,
+            'fh_squad': None,
+            'wc_squad': None
+        }
+
+        # BB projections (only if BB available and DGWs exist)
+        if 'bboost' not in chips_used_this_half and dgws:
+            result['bb_projections'] = self.calculate_bb_projections(squad_analysis, dgws)
+
+        # TC rankings (only if TC available and DGWs exist)
+        if '3xc' not in chips_used_this_half and dgws:
+            result['tc_rankings'] = self.rank_tc_options(squad_analysis, dgws)
+
+        # FH squad (only if FH available and BGWs exist)
+        if 'freehit' not in chips_used_this_half and bgws:
+            # Only generate if BGW is within 5 GWs
+            if bgws[0].get('gw', 0) - current_gw <= 5:
+                result['fh_squad'] = self.generate_fh_squad_suggestion(bgws)
+
+        # WC squad (only if WC available)
+        if 'wildcard' not in chips_used_this_half:
+            result['wc_squad'] = self.generate_wc_squad_suggestion()
+
+        return result
 
 
 class WildcardOptimizer:

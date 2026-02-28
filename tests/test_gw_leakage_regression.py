@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from reports.fpl_report.plot_generator import PlotGenerator
 from reports.fpl_report.fpl_core_predictor import FPLCorePredictor
+import generate_fpl_report as gfr
 
 class TestGWLeakageRegression(unittest.TestCase):
     """Tests to prevent future GW leakage into report analysis windows."""
@@ -114,6 +115,78 @@ class TestGWLeakageRegression(unittest.TestCase):
         self.assertIn((1, 2), predictor._fixture_cache, "GW2 fixture for team 1 should be cached via fallback")
         self.assertIn((3, 2), predictor._fixture_cache, "GW2 fixture for team 3 should be cached via fallback")
 
+    def test_latest_available_fplcore_gw_falls_back_from_empty_current_gw(self):
+        """When current GW data is empty, should use latest non-empty GW."""
+        all_gw_data = {
+            26: {'player_gameweek_stats': pd.DataFrame({'id': [1], 'gw': [26]})},
+            27: {'player_gameweek_stats': pd.DataFrame({'id': [1], 'gw': [27]})},
+            28: {'player_gameweek_stats': pd.DataFrame(columns=['id', 'gw'])},  # In-progress/empty
+        }
+
+        effective_gw = gfr.get_latest_available_fplcore_gw(all_gw_data, requested_gw=28)
+        self.assertEqual(effective_gw, 27)
+
+    def test_latest_available_fplcore_gw_requires_fully_finished_fixtures(self):
+        """Should skip in-progress GW even when stats file is non-empty."""
+        all_gw_data = {
+            27: {
+                'player_gameweek_stats': pd.DataFrame({'id': [1], 'gw': [27]}),
+                'fixtures': pd.DataFrame({'finished': [True, True, True]})
+            },
+            28: {
+                'player_gameweek_stats': pd.DataFrame({'id': [1], 'gw': [28]}),  # partial updates landed
+                'fixtures': pd.DataFrame({'finished': [True, False, False]})      # GW still in progress
+            },
+        }
+
+        effective_gw = gfr.get_latest_available_fplcore_gw(
+            all_gw_data,
+            requested_gw=28,
+            require_finished_fixtures=True
+        )
+        self.assertEqual(effective_gw, 27)
+
+    def test_clinical_chart_deletes_stale_gw_plot_when_no_gw_data(self):
+        """Stale GW image must be removed if GW chart is not regenerated."""
+        stale_gw_plot = self.temp_dir / 'clinical_wasteful_gw.png'
+        stale_gw_plot.write_bytes(b'stale')
+
+        fpl_core_season_data = {
+            'playerstats': pd.DataFrame([{
+                'id': 1,
+                'web_name': 'Player1',
+                'first_name': 'P',
+                'second_name': 'One',
+                'gw': 27,
+                'minutes': 900,
+                'goals_scored': 10,
+                'assists': 2,
+                'expected_goals': 7.0,
+                'expected_assists': 1.2
+            }]),
+            'players': pd.DataFrame([{
+                'player_id': 1,
+                'position': 'Forward'
+            }])
+        }
+        # Empty current GW dataset (e.g., GW still in progress)
+        fpl_core_gw_data = {
+            'player_gameweek_stats': pd.DataFrame(columns=[
+                'id', 'gw', 'goals_scored', 'assists', 'expected_goals', 'expected_assists', 'minutes'
+            ])
+        }
+
+        season_file, gw_file = self.plot_gen.generate_clinical_wasteful_chart(
+            fpl_core_season_data=fpl_core_season_data,
+            fpl_core_gw_data=fpl_core_gw_data,
+            squad_ids=[1],
+            current_gw=28
+        )
+
+        self.assertEqual(season_file, 'clinical_wasteful_season.png')
+        self.assertIsNone(gw_file)
+        self.assertTrue((self.temp_dir / 'clinical_wasteful_season.png').exists())
+        self.assertFalse(stale_gw_plot.exists(), "Stale GW plot should have been deleted")
+
 if __name__ == '__main__':
     unittest.main()
-

@@ -60,6 +60,15 @@ class PlotGenerator:
         plt.savefig(self.output_dir / filename, dpi=300, bbox_inches='tight')
         plt.close()
 
+    def _remove_plot_if_exists(self, filename: str):
+        """Delete an existing plot file to avoid stale image reuse."""
+        path = self.output_dir / filename
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     def _calculate_contributing_points(self, season_history: List[Dict]) -> Dict[str, Dict]:
         """Calculate points only when players were in starting XI.
         
@@ -222,7 +231,7 @@ class PlotGenerator:
         # Create a numeric matrix for coloring
         # 0: Not owned, 1: Bench, 2: Lineup, 3: Captain
         status_map = {'Bench': 1, 'Lineup': 2, 'Captain': 3}
-        color_matrix = pivot_status.replace(status_map).fillna(0)
+        color_matrix = pivot_status.replace(status_map).fillna(0).astype(float)
         
         # Custom colormap
         # 0: white, 1: pink (bench), 2: light blue (lineup), 3: green (captain)
@@ -2426,6 +2435,11 @@ class PlotGenerator:
             fpl_core_season_data, fpl_core_gw_data, current_gw, min_minutes=450
         )
         
+        season_file = 'clinical_wasteful_season.png'
+        gw_file = 'clinical_wasteful_gw.png'
+        self._remove_plot_if_exists(season_file)
+        self._remove_plot_if_exists(gw_file)
+
         filenames = []
         
         # Generate Season chart
@@ -2485,7 +2499,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                season_file = 'clinical_wasteful_season.png'
                 self._save_plot(season_file)
                 filenames.append(season_file)
         
@@ -2540,7 +2553,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                gw_file = 'clinical_wasteful_gw.png'
                 self._save_plot(gw_file)
                 filenames.append(gw_file)
         
@@ -2571,6 +2583,11 @@ class PlotGenerator:
             fpl_core_season_data, fpl_core_gw_data, current_gw, min_minutes=0, squad_ids=squad_ids
         )
         
+        season_file = 'clinical_wasteful_season_squad.png'
+        gw_file = 'clinical_wasteful_gw_squad.png'
+        self._remove_plot_if_exists(season_file)
+        self._remove_plot_if_exists(gw_file)
+
         filenames = []
         
         # Generate Season chart
@@ -2619,7 +2636,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                season_file = 'clinical_wasteful_season_squad.png'
                 self._save_plot(season_file)
                 filenames.append(season_file)
         
@@ -2668,7 +2684,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                gw_file = 'clinical_wasteful_gw_squad.png'
                 self._save_plot(gw_file)
                 filenames.append(gw_file)
         
@@ -2701,6 +2716,11 @@ class PlotGenerator:
             fpl_core_season_data, fpl_core_gw_data, current_gw, min_minutes=450
         )
         
+        season_file = 'clutch_frustrated_season.png'
+        gw_file = 'clutch_frustrated_gw.png'
+        self._remove_plot_if_exists(season_file)
+        self._remove_plot_if_exists(gw_file)
+
         filenames = []
         
         # Generate Season chart
@@ -2760,7 +2780,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                season_file = 'clutch_frustrated_season.png'
                 self._save_plot(season_file)
                 filenames.append(season_file)
         
@@ -2815,7 +2834,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                gw_file = 'clutch_frustrated_gw.png'
                 self._save_plot(gw_file)
                 filenames.append(gw_file)
         
@@ -2846,6 +2864,11 @@ class PlotGenerator:
             fpl_core_season_data, fpl_core_gw_data, current_gw, min_minutes=0, squad_ids=squad_ids
         )
         
+        season_file = 'clutch_frustrated_season_squad.png'
+        gw_file = 'clutch_frustrated_gw_squad.png'
+        self._remove_plot_if_exists(season_file)
+        self._remove_plot_if_exists(gw_file)
+
         filenames = []
         
         # Generate Season chart
@@ -2894,7 +2917,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                season_file = 'clutch_frustrated_season_squad.png'
                 self._save_plot(season_file)
                 filenames.append(season_file)
         
@@ -2943,7 +2965,6 @@ class PlotGenerator:
                 ax.spines['right'].set_visible(False)
                 
                 plt.tight_layout()
-                gw_file = 'clutch_frustrated_gw_squad.png'
                 self._save_plot(gw_file)
                 filenames.append(gw_file)
         
@@ -3382,4 +3403,3 @@ class PlotGenerator:
             filename=filename,
             title_suffix=None
         )
-

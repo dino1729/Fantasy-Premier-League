@@ -271,6 +271,8 @@ class PlayerAnalyzer:
                 'goals': int(stats.get('goals_scored', 0) or 0),
                 'assists': int(stats.get('assists', 0) or 0),
                 'clean_sheets': int(stats.get('clean_sheets', 0) or 0),
+                'saves': int(stats.get('saves', 0) or 0),
+                'goals_conceded': int(stats.get('goals_conceded', 0) or 0),
                 'bonus': int(stats.get('bonus', 0) or 0),
                 'bps': int(stats.get('bps', 0) or 0)
             }
