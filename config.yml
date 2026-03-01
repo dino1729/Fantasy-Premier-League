@@ -34,7 +34,7 @@ competitors:
 
 # Target gameweek to analyze (1-38)
 # Set to null to auto-detect the current/most recent completed gameweek.
-gameweek: 21
+gameweek: 27
 
 # Season identifier (used for data folder paths)
 season: "2025-26"
@@ -48,7 +48,7 @@ season: "2025-26"
 
 free_hit:
   # Target gameweek for Free Hit draft (null = next deadline GW)
-  target_gw: 24
+  target_gw: 31
   
   # Strategy mode - how aggressive to be with differentials:
   #   "safe"       - Maximize overlap with league template, minimal differentials
@@ -156,7 +156,7 @@ cache:
 data:
   # Data staleness threshold in hours (1-24)
   # If local data is older than this, the scraper will refresh from FPL API.
-  staleness_hours: 6
+  staleness_hours: 240
   
   # Minimum minutes played for player analysis (0-900)
   # Players with fewer minutes are excluded from peer comparisons.
@@ -184,6 +184,56 @@ competitive:
   
   # Number of gameweeks to show in transfer history comparison (3-10)
   transfer_history_gws: 5
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INTELLIGENCE LAYER (OPTIONAL LLM NARRATIVES)
+# ═══════════════════════════════════════════════════════════════════════════
+# Adds model-generated tactical narratives to selected report sections.
+# Runtime credentials are read from environment variables:
+#   - LITELLM_API_BASE
+#   - LITELLM_API_KEY
+
+intelligence:
+  # Master toggle for intelligence layer (true/false)
+  enabled: true
+
+  # Primary model and ordered fallback models
+  model: "gpt-5.2"
+  fallback_models:
+    - "gemini-3.1-pro-preview"
+
+  # Retry count per model before trying fallback model
+  retries: 2
+
+  # Request timeout in seconds (high default; no global latency cap)
+  timeout_seconds: 120
+
+  # Cross-run cache TTL for generated section narratives (seconds)
+  cache_ttl_seconds: 86400
+
+  # Per-section max token budgets
+  max_tokens:
+    transfer_strategy: 1000
+    wildcard_draft: 900
+    free_hit_draft: 900
+    chip_usage_strategy: 1200
+    season_insights: 800
+
+  # Section toggles (active only if intelligence.enabled=true)
+  sections:
+    transfer_strategy: true
+    wildcard_draft: true
+    free_hit_draft: true
+    chip_usage_strategy: true
+    season_insights: true
+
+  # Web search for DGW/BGW prediction (Perplexity Sonar)
+  dgw_bgw_search:
+    enabled: true
+    model: "sonar-pro"
+    cache_ttl_seconds: 21600  # 6 hours
+    max_results: 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════

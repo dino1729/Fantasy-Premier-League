@@ -14,10 +14,15 @@ import argparse
 import subprocess
 import sys
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 import copy
 from typing import Dict, List, Optional
+
+if 'LOKY_MAX_CPU_COUNT' not in os.environ:
+    os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count() or 4)
 
 from reports.fpl_report.data_fetcher import (
     FPLDataFetcher, 
@@ -33,6 +38,7 @@ from reports.fpl_report.plot_generator import PlotGenerator
 from reports.fpl_report.transfer_strategy import TransferStrategyPlanner, WildcardOptimizer, FreeHitOptimizer
 from reports.fpl_report.cache_manager import CacheManager
 from reports.fpl_report.session_cache import SessionCacheManager
+from reports.fpl_report.intelligence_layer import IntelligenceLayer
 from etl.fetchers import FPLCoreInsightsFetcher
 
 # Import centralized configuration
@@ -55,6 +61,7 @@ from utils.config import (
     VERBOSE,
     CACHE,
     TOP_GLOBAL_COUNT,
+    INTELLIGENCE,
 )
 
 
@@ -114,6 +121,36 @@ Run via: ./reports/run_report.sh
                         help=f'Number of candidates per position (config: {MIP_CANDIDATE_POOL})')
     parser.add_argument('--free-transfers', type=int, default=FREE_TRANSFERS_OVERRIDE,
                         help='Number of free transfers available (config or auto-calc)')
+    intelligence_group = parser.add_mutually_exclusive_group()
+    intelligence_group.add_argument(
+        '--intelligence',
+        action='store_true',
+        help='Enable intelligence layer for narrative report sections'
+    )
+    intelligence_group.add_argument(
+        '--no-intelligence',
+        action='store_true',
+        help='Disable intelligence layer for narrative report sections'
+    )
+    parser.add_argument(
+        '--intelligence-model',
+        type=str,
+        default=None,
+        help='Primary model for intelligence layer (LiteLLM gateway model id)'
+    )
+    parser.add_argument(
+        '--intelligence-fallback-models',
+        type=str,
+        default=None,
+        help='Comma-separated fallback models for intelligence layer'
+    )
+    parser.add_argument(
+        '--intelligence-sections',
+        type=str,
+        default=None,
+        help='Comma-separated section keys to enable when intelligence is on '
+             '(transfer_strategy,wildcard_draft,free_hit_draft,chip_usage_strategy,season_insights)'
+    )
     return parser.parse_args()
 
 
@@ -121,6 +158,13 @@ def log(message: str, verbose: bool = True):
     """Print log message if verbose mode is enabled."""
     if verbose:
         print(f"[INFO] {message}")
+
+
+def _parse_csv_list(value: Optional[str]) -> List[str]:
+    """Parse comma-separated CLI values into a cleaned list."""
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def get_top_global_comparison_ids(
@@ -183,6 +227,98 @@ def get_latest_available_fplcore_gw(
         available_gws.append(gw_int)
 
     return max(available_gws) if available_gws else None
+
+
+class PhaseTimer:
+    """Simple phase-level timer for report generation."""
+
+    def __init__(self, verbose: bool = True):
+        self.verbose = verbose
+        self._started_at: Dict[str, float] = {}
+        self.measurements: List[Dict[str, float]] = []
+
+    def start(self, phase_name: str):
+        self._started_at[phase_name] = time.perf_counter()
+
+    def stop(self, phase_name: str):
+        started = self._started_at.pop(phase_name, None)
+        if started is None:
+            return
+        elapsed = time.perf_counter() - started
+        self.measurements.append({"phase": phase_name, "seconds": elapsed})
+        if self.verbose:
+            print(f"[TIME] {phase_name}: {elapsed:.2f}s")
+
+    def print_summary(self):
+        if not self.measurements:
+            return
+        total = sum(item["seconds"] for item in self.measurements)
+        print(f"\n{'='*60}")
+        print("  Timing Summary")
+        print(f"{'='*60}")
+        for item in self.measurements:
+            phase = item["phase"]
+            seconds = item["seconds"]
+            pct = (seconds / total * 100.0) if total else 0.0
+            print(f"  {phase:<40} {seconds:>7.2f}s ({pct:>5.1f}%)")
+        print(f"  {'TOTAL':<40} {total:>7.2f}s")
+        print(f"{'='*60}")
+
+
+def _analyze_squad_player(
+    player: Dict,
+    analyzer: PlayerAnalyzer,
+    fetcher: FPLDataFetcher,
+) -> Dict:
+    """Analyze one squad player and attach GW history payload for charts."""
+    player_id = player['id']
+    position = player['position']
+    analysis = analyzer.generate_player_summary(player_id, position)
+    analysis['position_in_squad'] = player.get('position_in_squad', 0)
+    analysis['is_captain'] = player.get('is_captain', False)
+    analysis['is_vice_captain'] = player.get('is_vice_captain', False)
+
+    player_history = fetcher.get_player_history(player_id)
+    if not player_history.empty:
+        analysis['gw_history'] = player_history.to_dict('records')
+    else:
+        analysis['gw_history'] = []
+    return analysis
+
+
+def _execute_plot_task(plot_gen: PlotGenerator, task: Dict) -> Optional[object]:
+    """Execute one plot generation task."""
+    method_name = task["method"]
+    method = getattr(plot_gen, method_name)
+    args = task.get("args", ())
+    kwargs = task.get("kwargs", {})
+    return method(*args, **kwargs)
+
+
+def _run_plot_tasks(
+    plot_gen: PlotGenerator,
+    tasks: List[Dict],
+    verbose: bool,
+    max_workers: int = 6,
+) -> Dict[str, Optional[object]]:
+    """Run plot tasks sequentially.
+
+    matplotlib's pyplot state machine is not thread-safe, so plots must be
+    generated one at a time to avoid corrupted figures (wrong dimensions,
+    elements from different charts merging, etc.).
+    """
+    if not tasks:
+        return {}
+
+    results: Dict[str, Optional[object]] = {}
+    for task in tasks:
+        task_name = task.get("name", task.get("method", "plot"))
+        try:
+            results[task_name] = _execute_plot_task(plot_gen, task)
+        except Exception as exc:
+            log(f"  [WARN] Plot task '{task_name}' failed: {exc}", verbose)
+            results[task_name] = None
+    return results
 
 
 def main():
@@ -257,6 +393,47 @@ def main():
     team_id = args.team
     season = args.season
     verbose = args.verbose
+    phase_timer = PhaseTimer(verbose=verbose)
+
+    # Resolve intelligence settings (config defaults + CLI overrides)
+    intelligence_config = copy.deepcopy(INTELLIGENCE) if isinstance(INTELLIGENCE, dict) else {}
+    intelligence_config.setdefault('enabled', False)
+    intelligence_config.setdefault('model', 'gpt-5.2')
+    intelligence_config.setdefault('fallback_models', ['gemini-3.1-pro-preview'])
+    intelligence_config.setdefault('retries', 2)
+    intelligence_config.setdefault('timeout_seconds', 120)
+    intelligence_config.setdefault('cache_ttl_seconds', 86400)
+    intelligence_config.setdefault('sections', {})
+    intelligence_config.setdefault('max_tokens', {})
+
+    if args.intelligence:
+        intelligence_config['enabled'] = True
+    elif args.no_intelligence:
+        intelligence_config['enabled'] = False
+
+    if args.intelligence_model:
+        intelligence_config['model'] = args.intelligence_model.strip()
+
+    if args.intelligence_fallback_models is not None:
+        intelligence_config['fallback_models'] = _parse_csv_list(args.intelligence_fallback_models)
+
+    valid_intelligence_sections = {
+        'transfer_strategy',
+        'wildcard_draft',
+        'free_hit_draft',
+        'chip_usage_strategy',
+        'season_insights',
+    }
+    if args.intelligence_sections is not None:
+        requested_sections = _parse_csv_list(args.intelligence_sections)
+        normalized_sections = set(requested_sections)
+        unknown_sections = sorted(normalized_sections - valid_intelligence_sections)
+        if unknown_sections:
+            print(f"[WARN] Ignoring unknown intelligence sections: {', '.join(unknown_sections)}")
+        enabled_sections = {key: False for key in valid_intelligence_sections}
+        for key in sorted(normalized_sections & valid_intelligence_sections):
+            enabled_sections[key] = True
+        intelligence_config['sections'] = enabled_sections
 
     print(f"\n{'='*60}")
     print(f"  FPL Report Generator")
@@ -265,15 +442,21 @@ def main():
         print(f"  Cache: Enabled (Session-based)")
     else:
         print(f"  Cache: Disabled")
+    print(
+        f"  Intelligence: {'Enabled' if intelligence_config.get('enabled') else 'Disabled'}"
+    )
     print(f"{'='*60}\n")
 
     # Initialize temporary fetcher to get current gameweek if not specified
+    phase_timer.start("Gameweek auto-detection")
     if preliminary_gameweek is None:
         temp_fetcher = FPLDataFetcher(team_id, season, use_cache=False)
         preliminary_gameweek = temp_fetcher.get_current_gameweek()
         log(f"Auto-detected gameweek: {preliminary_gameweek}", verbose)
+    phase_timer.stop("Gameweek auto-detection")
     
     # Initialize session cache manager
+    phase_timer.start("Session cache init")
     session_cache = None
     if use_cache:
         # Get cache settings from centralized config
@@ -289,6 +472,7 @@ def main():
             single_file=True
         )
         log(f"Session cache initialized: {session_cache.session_id}", verbose)
+    phase_timer.stop("Session cache init")
     
     # Initialize components
     log("Initializing data fetcher...", verbose)
@@ -299,6 +483,7 @@ def main():
     log(f"Analyzing Gameweek {gameweek}", verbose)
     
     # Fetch FPL Core Insights data (enhanced datasets with match stats + Elo)
+    phase_timer.start("FPL Core Insights fetch")
     log("Fetching FPL Core Insights data...", verbose)
     # Convert season format from "2025-26" to "2025-2026"
     fpl_core_season = season.replace("-", "-20") if len(season.split("-")[1]) == 2 else season
@@ -397,8 +582,10 @@ def main():
             total_datasets += len(cache_info_gw)
             cached_datasets += sum(1 for info in cache_info_gw.values() if info['exists'])
         print(f"    {cached_datasets}/{total_datasets} datasets cached across {gameweek} gameweeks")
+    phase_timer.stop("FPL Core Insights fetch")
 
     # Fetch team info
+    phase_timer.start("Team and history fetch")
     log("Fetching team information...", verbose)
     try:
         team_info = fetcher.get_team_info(gameweek=gameweek)
@@ -431,31 +618,24 @@ def main():
     except Exception as e:
         print(f"[ERROR] Failed to fetch squad: {e}")
         sys.exit(1)
+    phase_timer.stop("Team and history fetch")
 
     # Initialize analyzer
     log("Initializing player analyzer...", verbose)
     analyzer = PlayerAnalyzer(fetcher)
 
     # Analyze each player
+    phase_timer.start("Squad analysis")
     log("Analyzing squad players...", verbose)
-    squad_analysis = []
-    for player in squad:
-        player_id = player['id']
-        position = player['position']
-        log(f"  Analyzing {player['name']}...", verbose)
-        analysis = analyzer.generate_player_summary(player_id, position)
-        analysis['position_in_squad'] = player.get('position_in_squad', 0)
-        analysis['is_captain'] = player.get('is_captain', False)
-        analysis['is_vice_captain'] = player.get('is_vice_captain', False)
-
-        # Fetch GW history for cumulative points chart
-        player_history = fetcher.get_player_history(player_id)
-        if not player_history.empty:
-            analysis['gw_history'] = player_history.to_dict('records')
-        else:
-            analysis['gw_history'] = []
-
-        squad_analysis.append(analysis)
+    squad_workers = max(1, min(5, len(squad)))
+    log(f"  Running squad analysis with {squad_workers} workers...", verbose)
+    with ThreadPoolExecutor(max_workers=squad_workers) as executor:
+        futures = [
+            executor.submit(_analyze_squad_player, player, analyzer, fetcher)
+            for player in squad
+        ]
+        squad_analysis = [future.result() for future in futures]
+    phase_timer.stop("Squad analysis")
 
     # Add FPL API fixtures as fallback for future GW predictions
     # This allows the FPL Core predictor to use fixture data even when
@@ -464,6 +644,7 @@ def main():
     
     # Initialize recommender with FPL Core data for enhanced predictions
     # Pass previous season data for cross-season training (if available)
+    phase_timer.start("Transfer recommendation engine")
     log("Generating transfer recommendations...", verbose)
     recommender = TransferRecommender(
         fetcher, analyzer,
@@ -513,15 +694,18 @@ def main():
         except Exception as e:
             print(f"  [WARN] Failed to calculate FTs: {e}. Defaulting to 1.")
             free_transfers = 1
+    phase_timer.stop("Transfer recommendation engine")
 
     # Generate multi-week transfer strategy
+    phase_timer.start("Multi-week transfer strategy")
     log("Generating multi-week transfer strategy...", verbose)
     strategy_planner = TransferStrategyPlanner(fetcher, analyzer, recommender)
     use_mip = not args.no_mip
     try:
+        from utils.config import TRANSFER_HORIZON
         multi_week_strategy = strategy_planner.generate_strategy(
-            squad_analysis, 
-            num_weeks=5,
+            squad_analysis,
+            num_weeks=TRANSFER_HORIZON,
             use_mip=use_mip,
             mip_time_limit=args.mip_time_limit,
             mip_candidate_pool=args.mip_pool_size,
@@ -549,8 +733,10 @@ def main():
     except Exception as e:
         print(f"[WARNING] Multi-week strategy generation failed: {e}")
         multi_week_strategy = None
+    phase_timer.stop("Multi-week transfer strategy")
 
     # Generate chip analysis for personalized recommendations
+    phase_timer.start("Chip opportunities analysis")
     log("Analyzing chip opportunities...", verbose)
     chip_analysis = None
     try:
@@ -568,8 +754,10 @@ def main():
     except Exception as e:
         print(f"  [WARN] Chip analysis failed: {e}")
         chip_analysis = None
+    phase_timer.stop("Chip opportunities analysis")
 
     # Generate Phase 2 chip projections (BB/TC/FH/WC optimizer-based)
+    phase_timer.start("Phase 2 chip projections")
     log("Generating Phase 2 chip projections (optimizer-based)...", verbose)
     try:
         phase2_analysis = strategy_planner.get_phase2_chip_analysis(
@@ -600,8 +788,10 @@ def main():
         if chip_analysis is None:
             chip_analysis = {}
         chip_analysis['phase2'] = None
+    phase_timer.stop("Phase 2 chip projections")
 
     # Generate 5-GW predictions for ALL top players (for Wildcard/Free Hit drafts)
+    phase_timer.start("Draft candidate predictions")
     log("Generating 5-GW predictions for draft candidates...", verbose)
     all_player_predictions = {}
     try:
@@ -618,19 +808,39 @@ def main():
     except Exception as e:
         print(f"  [WARN] Draft predictions failed: {e}")
         all_player_predictions = {}
+    phase_timer.stop("Draft candidate predictions")
 
     # Generate Plots
+    phase_timer.start("Plot generation")
     log("Generating visualizations...", verbose)
     output_dir = Path(__file__).parent / "reports" / "plots"
     plot_gen = PlotGenerator(output_dir)
-    
-    # Generate specific plots
-    plot_gen.generate_points_per_gw(gw_history, chips_used)
-    plot_gen.generate_contribution_heatmap(season_history)
-    # Pass season_history to treemap so it only counts points when players were in starting XI
-    plot_gen.generate_treemap(season_history)
-    plot_gen.generate_transfer_matrix(transfers)
-    
+
+    # Generate core plots in parallel
+    base_plot_tasks = [
+        {
+            "name": "points_per_gw",
+            "method": "generate_points_per_gw",
+            "args": (gw_history, chips_used),
+        },
+        {
+            "name": "contribution_heatmap",
+            "method": "generate_contribution_heatmap",
+            "args": (season_history,),
+        },
+        {
+            "name": "treemap",
+            "method": "generate_treemap",
+            "args": (season_history,),
+        },
+        {
+            "name": "transfer_matrix",
+            "method": "generate_transfer_matrix",
+            "args": (transfers,),
+        },
+    ]
+    _run_plot_tasks(plot_gen, base_plot_tasks, verbose=verbose)
+
     # Generate advanced finishing & creativity plots from FPL Core Insights data
     log("Generating advanced finishing & creativity analysis...", verbose)
     squad_ids = [p['id'] for p in squad]
@@ -640,102 +850,100 @@ def main():
             f"(GW{gameweek} data not complete yet)"
         )
     try:
-        # Clinical vs Wasteful Goals (league-wide context)
-        plot_gen.generate_clinical_wasteful_chart(
-            fpl_core_season_data,
-            fpl_core_gw_data,
-            squad_ids,
-            fpl_core_effective_gw
-        )
-        # Clinical vs Wasteful Goals (squad-only)
-        plot_gen.generate_clinical_wasteful_chart_squad_only(
-            fpl_core_season_data,
-            fpl_core_gw_data,
-            squad_ids,
-            fpl_core_effective_gw
-        )
-        # Clutch vs Frustrated Assists (league-wide context)
-        plot_gen.generate_clutch_frustrated_chart(
-            fpl_core_season_data,
-            fpl_core_gw_data,
-            squad_ids,
-            fpl_core_effective_gw
-        )
-        # Clutch vs Frustrated Assists (squad-only)
-        plot_gen.generate_clutch_frustrated_chart_squad_only(
-            fpl_core_season_data,
-            fpl_core_gw_data,
-            squad_ids,
-            fpl_core_effective_gw
-        )
-        # Usage vs Output Scatter (league-wide context)
-        plot_gen.generate_usage_output_scatter(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids
-        )
-        # Usage vs Output Scatter (recent form - league-wide, last 5 GWs)
-        plot_gen.generate_usage_output_scatter_recent(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids,
-            last_n_gw=5
-        )
-        # Usage vs Output Scatter (squad-only)
-        plot_gen.generate_usage_output_scatter_squad_only(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids,
-            gameweek
-        )
-        # Usage vs Output Scatter (recent form - squad-only, last 5 GWs)
-        plot_gen.generate_usage_output_scatter_squad_recent(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids,
-            gameweek,
-            last_n_gw=5
-        )
-        # Defensive Value Charts (season)
-        plot_gen.generate_defensive_value_scatter(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids
-        )
-        # Defensive Value Charts (recent form - last 5 GWs)
-        plot_gen.generate_defensive_value_scatter_recent(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids,
-            last_n_gw=5
-        )
-        # Goalkeeper Shot-Stopping Charts (season)
-        plot_gen.generate_goalkeeper_value_scatter(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids
-        )
-        # Goalkeeper Shot-Stopping Charts (recent form - last 5 GWs)
-        plot_gen.generate_goalkeeper_value_scatter_recent(
-            all_gw_data,
-            fpl_core_season_data,
-            squad_ids,
-            last_n_gw=5
-        )
-        log("  Advanced analysis plots generated successfully (league + squad + defensive)", verbose)
+        advanced_plot_tasks = [
+            {
+                "name": "clinical_wasteful",
+                "method": "generate_clinical_wasteful_chart",
+                "args": (fpl_core_season_data, fpl_core_gw_data, squad_ids, fpl_core_effective_gw),
+            },
+            {
+                "name": "clinical_wasteful_squad",
+                "method": "generate_clinical_wasteful_chart_squad_only",
+                "args": (fpl_core_season_data, fpl_core_gw_data, squad_ids, fpl_core_effective_gw),
+            },
+            {
+                "name": "clutch_frustrated",
+                "method": "generate_clutch_frustrated_chart",
+                "args": (fpl_core_season_data, fpl_core_gw_data, squad_ids, fpl_core_effective_gw),
+            },
+            {
+                "name": "clutch_frustrated_squad",
+                "method": "generate_clutch_frustrated_chart_squad_only",
+                "args": (fpl_core_season_data, fpl_core_gw_data, squad_ids, fpl_core_effective_gw),
+            },
+            {
+                "name": "usage_output_scatter",
+                "method": "generate_usage_output_scatter",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+            },
+            {
+                "name": "usage_output_scatter_recent",
+                "method": "generate_usage_output_scatter_recent",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+                "kwargs": {"last_n_gw": 5},
+            },
+            {
+                "name": "usage_output_scatter_squad",
+                "method": "generate_usage_output_scatter_squad_only",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids, gameweek),
+            },
+            {
+                "name": "usage_output_scatter_squad_recent",
+                "method": "generate_usage_output_scatter_squad_recent",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids, gameweek),
+                "kwargs": {"last_n_gw": 5},
+            },
+            {
+                "name": "defensive_value_scatter",
+                "method": "generate_defensive_value_scatter",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+            },
+            {
+                "name": "defensive_value_scatter_recent",
+                "method": "generate_defensive_value_scatter_recent",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+                "kwargs": {"last_n_gw": 5},
+            },
+            {
+                "name": "goalkeeper_value_scatter",
+                "method": "generate_goalkeeper_value_scatter",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+            },
+            {
+                "name": "goalkeeper_value_scatter_recent",
+                "method": "generate_goalkeeper_value_scatter_recent",
+                "args": (all_gw_data, fpl_core_season_data, squad_ids),
+                "kwargs": {"last_n_gw": 5},
+            },
+        ]
+        advanced_results = _run_plot_tasks(plot_gen, advanced_plot_tasks, verbose=verbose)
+        if any(value is not None for value in advanced_results.values()):
+            log("  Advanced analysis plots generated successfully (league + squad + defensive)", verbose)
+        else:
+            log("  Warning: Advanced analysis plots were not generated", verbose)
     except Exception as e:
         log(f"  Warning: Could not generate advanced analysis plots: {e}", verbose)
-    
-    # Generate hindsight fixture analysis
+
+    # Generate hindsight fixture analysis (parallelized task wrapper for consistency)
     log("Generating hindsight fixture analysis...", verbose)
     teams_data = fetcher.bootstrap_data.get('teams', [])
-    plot_gen.generate_hindsight_fixture_analysis(
-        season_history, 
-        fetcher.fixtures_df, 
-        teams_data,
-        start_gw=max(1, gameweek - 10),  # Last 10 GWs or less
-        end_gw=gameweek
-    )
+    hindsight_tasks = [
+        {
+            "name": "hindsight_fixture_analysis",
+            "method": "generate_hindsight_fixture_analysis",
+            "args": (
+                season_history,
+                fetcher.fixtures_df,
+                teams_data,
+            ),
+            "kwargs": {
+                "start_gw": max(1, gameweek - 10),
+                "end_gw": gameweek,
+            },
+        }
+    ]
+    _run_plot_tasks(plot_gen, hindsight_tasks, verbose=verbose)
+    phase_timer.stop("Plot generation")
 
     # Determine competitor IDs (used for both competitive analysis and Free Hit ownership)
     if args.compare is not None:
@@ -750,6 +958,7 @@ def main():
         competitor_ids = [team_id] + competitor_ids
 
     # Competitive Analysis
+    phase_timer.start("Competitive analysis")
     competitive_data = None
     if not args.no_competitive:
         log(f"Building competitive analysis for {len(competitor_ids)} teams...", verbose)
@@ -765,19 +974,39 @@ def main():
 
             # Generate competitive plots
             log("Generating competitive plots...", verbose)
-            plot_gen.generate_competitive_points_per_gw(competitive_data)
-            plot_gen.generate_competitive_points_progression(competitive_data)
-            plot_gen.generate_competitive_rank_progression(competitive_data)
-            
-            # Generate treemaps for each competitor
+            competitive_plot_tasks = [
+                {
+                    "name": "competitive_points_per_gw",
+                    "method": "generate_competitive_points_per_gw",
+                    "args": (competitive_data,),
+                },
+                {
+                    "name": "competitive_points_progression",
+                    "method": "generate_competitive_points_progression",
+                    "args": (competitive_data,),
+                },
+                {
+                    "name": "competitive_rank_progression",
+                    "method": "generate_competitive_rank_progression",
+                    "args": (competitive_data,),
+                },
+                {
+                    "name": "competitive_treemaps",
+                    "method": "generate_competitive_treemaps",
+                    "args": (competitive_data,),
+                },
+            ]
+            competitive_plot_results = _run_plot_tasks(plot_gen, competitive_plot_tasks, verbose=verbose)
             log("Generating competitor treemaps...", verbose)
-            treemap_files = plot_gen.generate_competitive_treemaps(competitive_data)
+            treemap_files = competitive_plot_results.get("competitive_treemaps") or []
             print(f"  Generated {len(treemap_files)} competitor treemaps")
         except Exception as e:
             print(f"[WARNING] Competitive analysis failed: {e}")
             competitive_data = None
+    phase_timer.stop("Competitive analysis")
 
     # Top Global Managers Competitive Analysis
+    phase_timer.start("Top global comparison")
     top_global_data = None
     if not args.no_competitive:
         log(f"Building competitive analysis vs Top {TOP_GLOBAL_COUNT} Global Managers...", verbose)
@@ -804,33 +1033,73 @@ def main():
                 
                 # Generate plots for global comparison (with different filenames)
                 log("Generating top global manager plots...", verbose)
-                plot_gen.generate_competitive_points_per_gw(
-                    top_global_data, 
-                    filename='global_top_points_per_gw.png'
-                )
-                plot_gen.generate_competitive_points_progression(
-                    top_global_data,
-                    filename='global_top_points_progression.png'
-                )
-                plot_gen.generate_competitive_rank_progression(
-                    top_global_data,
-                    filename='global_top_rank_progression.png'
-                )
-                
+                global_plot_tasks = [
+                    {
+                        "name": "global_points_per_gw",
+                        "method": "generate_competitive_points_per_gw",
+                        "args": (top_global_data,),
+                        "kwargs": {"filename": "global_top_points_per_gw.png"},
+                    },
+                    {
+                        "name": "global_points_progression",
+                        "method": "generate_competitive_points_progression",
+                        "args": (top_global_data,),
+                        "kwargs": {"filename": "global_top_points_progression.png"},
+                    },
+                    {
+                        "name": "global_rank_progression",
+                        "method": "generate_competitive_rank_progression",
+                        "args": (top_global_data,),
+                        "kwargs": {"filename": "global_top_rank_progression.png"},
+                    },
+                    {
+                        "name": "global_treemaps",
+                        "method": "generate_competitive_treemaps",
+                        "args": (top_global_data,),
+                        "kwargs": {"prefix": "global_"},
+                    },
+                ]
+                global_plot_results = _run_plot_tasks(plot_gen, global_plot_tasks, verbose=verbose)
+
                 # Generate treemaps for global top teams
                 log("Generating top global manager treemaps...", verbose)
-                global_treemap_files = plot_gen.generate_competitive_treemaps(
-                    top_global_data,
-                    prefix='global_'
-                )
+                global_treemap_files = global_plot_results.get("global_treemaps") or []
                 print(f"  Generated {len(global_treemap_files)} global top treemaps")
             else:
                 print("  [WARN] Could not fetch top global teams")
         except Exception as e:
             print(f"[WARNING] Top global analysis failed: {e}")
             top_global_data = None
+    phase_timer.stop("Top global comparison")
+
+    # Compute differential ownership: players owned by top managers but not by user
+    differential_targets = set()
+    try:
+        user_player_ids = {p.get('id', p.get('element', 0)) for p in squad} if squad else set()
+        rival_sources = []
+        if top_global_data:
+            rival_sources.extend(top_global_data)
+        if competitive_data:
+            rival_sources.extend([t for t in competitive_data if t.get('team_id') != team_id])
+
+        if rival_sources:
+            # Count how many rivals own each player
+            rival_player_counts = {}
+            for rival in rival_sources:
+                for p in rival.get('squad', []):
+                    pid = p.get('element', p.get('id', 0))
+                    if pid and pid not in user_player_ids:
+                        rival_player_counts[pid] = rival_player_counts.get(pid, 0) + 1
+
+            # Players owned by 2+ rivals are template convergence targets
+            differential_targets = {pid for pid, count in rival_player_counts.items() if count >= 2}
+            if differential_targets:
+                print(f"  Template convergence targets: {len(differential_targets)} players owned by 2+ rivals")
+    except Exception as e:
+        print(f"  [WARN] Differential analysis failed: {e}")
 
     # Generate Wildcard draft squad
+    phase_timer.start("Wildcard optimization")
     log("Building Wildcard draft squad...", verbose)
     wildcard_team = None
     try:
@@ -882,8 +1151,10 @@ def main():
     except Exception as e:
         print(f"[WARNING] Wildcard squad generation failed: {e}")
         wildcard_team = None
+    phase_timer.stop("Wildcard optimization")
 
     # Generate Free Hit draft squad (league-aware)
+    phase_timer.start("Free Hit optimization")
     log("Building Free Hit draft squad...", verbose)
     free_hit_team = None
     league_ownership_data = None
@@ -1067,8 +1338,153 @@ def main():
     except Exception as e:
         print(f"[WARNING] Free Hit squad generation failed: {e}")
         free_hit_team = None
+    phase_timer.stop("Free Hit optimization")
+
+    # Generate optional intelligence narratives (section-level, model-backed)
+    phase_timer.start("Intelligence layer")
+    intelligence_payload = {}
+    intelligence_meta = {}
+    if intelligence_config.get('enabled'):
+        log("Generating intelligence layer narratives...", verbose)
+        try:
+            intelligence_layer = IntelligenceLayer(
+                settings=intelligence_config,
+                logger=lambda msg: log(msg, verbose),
+            )
+            intelligence_result = intelligence_layer.run(
+                context={
+                    'multi_week_strategy': multi_week_strategy,
+                    'wildcard_team': wildcard_team,
+                    'free_hit_team': free_hit_team,
+                    'chip_analysis': chip_analysis,
+                    'squad_analysis': squad_analysis,
+                    'gw_history': gw_history,
+                    'competitive_data': competitive_data,
+                    'top_global_data': top_global_data,
+                }
+            )
+            intelligence_payload = intelligence_result.payload
+            intelligence_meta = intelligence_result.meta
+
+            sections_cfg = intelligence_config.get('sections', {})
+            for section_key, section_meta in intelligence_meta.items():
+                if section_meta.get('source') == 'ai':
+                    model = section_meta.get('model', '?')
+                    cache_label = " (cache)" if section_meta.get('from_cache') else ""
+                    print(f"  [AI] {section_key}: {model}{cache_label}")
+                elif sections_cfg.get(section_key, True):
+                    reason = section_meta.get('error', 'fallback')
+                    print(f"  [AI-FALLBACK] {section_key}: deterministic ({reason})")
+        except Exception as e:
+            print(f"[WARNING] Intelligence layer failed globally: {e}")
+            intelligence_payload = {}
+            intelligence_meta = {}
+    phase_timer.stop("Intelligence layer")
+
+    # Cross-section consistency pass: filter captain picks that conflict with transfers
+    if multi_week_strategy and captain_picks:
+        mip_rec = multi_week_strategy.get('mip_recommendation')
+        if mip_rec and mip_rec.get('status') == 'optimal':
+            transfers_out_next_gw = set()
+            scenarios = mip_rec.get('scenarios', {})
+            # Check each scenario for first-week transfers out
+            for scenario_name in ('balanced', 'aggressive', 'conservative'):
+                scenario_data = scenarios.get(scenario_name, {})
+                scenario_plans = scenario_data.get('weekly_plans', [])
+                if scenario_plans:
+                    first_week = scenario_plans[0]
+                    for p_out in first_week.get('transfers_out', []):
+                        out_name = p_out.get('name', '')
+                        # Match by name since MIP plans don't always have player IDs
+                        for pick in captain_picks:
+                            if pick.get('name') == out_name:
+                                transfers_out_next_gw.add(pick.get('player_id'))
+                    break
+
+            if transfers_out_next_gw:
+                original_count = len(captain_picks)
+                captain_picks = [p for p in captain_picks
+                                 if p.get('player_id') not in transfers_out_next_gw]
+                filtered = original_count - len(captain_picks)
+                if filtered:
+                    print(f"  Consistency: filtered {filtered} captain picks conflicting with transfers")
+
+    # Compute captain ROI analysis from season_history
+    captain_roi = None
+    if season_history:
+        try:
+            captain_points_total = 0
+            optimal_captain_total = 0
+            captain_hit_count = 0
+            gws_counted = 0
+            for gw_entry in season_history:
+                gw_squad = gw_entry.get('squad', [])
+                if not gw_squad:
+                    continue
+                gws_counted += 1
+                # Find captain and their bonus points
+                captain_base = 0
+                best_base = 0
+                for p in gw_squad:
+                    base_pts = p.get('stats', {}).get('event_points', 0) or 0
+                    pos_in_squad = p.get('position_in_squad', 99)
+                    if pos_in_squad <= 11:
+                        best_base = max(best_base, base_pts)
+                    mult = p.get('multiplier', 1)
+                    if mult >= 2:  # Captain
+                        captain_base = base_pts
+                captain_bonus = captain_base  # The extra points from captaincy (1x base)
+                optimal_bonus = best_base
+                captain_points_total += captain_bonus
+                optimal_captain_total += optimal_bonus
+                # "Hit" = captain was top-3 scorer among starters
+                starter_pts = sorted(
+                    [p.get('stats', {}).get('event_points', 0) or 0
+                     for p in gw_squad if p.get('position_in_squad', 99) <= 11],
+                    reverse=True
+                )
+                if captain_base >= (starter_pts[2] if len(starter_pts) >= 3 else 0):
+                    captain_hit_count += 1
+
+            if gws_counted > 0:
+                captain_roi = {
+                    'captain_points': captain_points_total,
+                    'optimal_points': optimal_captain_total,
+                    'points_left_on_table': optimal_captain_total - captain_points_total,
+                    'hit_rate': round(captain_hit_count / gws_counted * 100, 1),
+                    'gws_counted': gws_counted,
+                }
+                print(f"  Captain ROI: {captain_roi['hit_rate']}% hit rate, {captain_roi['points_left_on_table']} pts left on table")
+        except Exception as e:
+            print(f"  [WARN] Captain ROI calculation failed: {e}")
+
+    # Compute mini-league position context for chip strategy
+    ml_position = None
+    if competitive_data:
+        try:
+            user_entry = next((t for t in competitive_data if t.get('team_id') == team_id), None)
+            if user_entry:
+                all_points = sorted([t.get('total_points', 0) for t in competitive_data], reverse=True)
+                user_pts = user_entry.get('total_points', 0)
+                leader_pts = all_points[0] if all_points else user_pts
+                rank_in_league = all_points.index(user_pts) + 1 if user_pts in all_points else len(all_points)
+                gap_to_leader = leader_pts - user_pts
+                ml_position = {
+                    'rank': rank_in_league,
+                    'total_teams': len(competitive_data),
+                    'gap_to_leader': gap_to_leader,
+                    'strategy': 'chasing' if gap_to_leader > 50 else ('protecting' if gap_to_leader < 20 else 'mid-pack'),
+                }
+                print(f"  Mini-league position: {ml_position['strategy']} (rank {rank_in_league}/{len(competitive_data)}, {gap_to_leader}pts behind leader)")
+        except Exception as e:
+            print(f"  [WARN] ML position computation failed: {e}")
+
+    # Inject ml_position into chip_analysis so LaTeX can display league context
+    if ml_position and chip_analysis:
+        chip_analysis['ml_position'] = ml_position
 
     # Generate LaTeX report
+    phase_timer.start("LaTeX compilation")
     log("Generating LaTeX report...", verbose)
     generator = LaTeXReportGenerator(team_id, gameweek, plot_dir=output_dir, session_cache=session_cache)
 
@@ -1094,7 +1510,10 @@ def main():
         free_hit_team=free_hit_team,
         season_history=season_history,
         top_global_data=top_global_data,
-        chip_analysis=chip_analysis
+        chip_analysis=chip_analysis,
+        intelligence_payload=intelligence_payload,
+        intelligence_meta=intelligence_meta,
+        captain_roi=captain_roi,
     )
 
     # Write LaTeX file
@@ -1105,15 +1524,19 @@ def main():
         f.write(latex_content)
 
     print(f"\n[SUCCESS] LaTeX report saved to: {output_path}")
+    phase_timer.stop("LaTeX compilation")
     
     # Save session cache to disk
+    phase_timer.start("Session cache save")
     if session_cache is not None:
         log("Saving session cache...", verbose)
         session_cache.save()
         stats = session_cache.get_stats()
         print(f"[INFO] Session cache saved: {stats['entries_in_memory']} entries, {stats['session_size_mb']:.2f} MB")
+    phase_timer.stop("Session cache save")
 
     # Compile to PDF if requested
+    phase_timer.start("PDF compilation")
     if not args.no_pdf:
         log("Compiling PDF with pdflatex...", verbose)
         try:
@@ -1149,6 +1572,9 @@ def main():
         except FileNotFoundError:
             print("[WARNING] pdflatex not found. Install TeX Live or MacTeX to compile PDFs.")
             print(f"  LaTeX source available at: {output_path}")
+    phase_timer.stop("PDF compilation")
+
+    phase_timer.print_summary()
 
     # Print summary
     print(f"\n{'='*60}")

@@ -480,6 +480,32 @@ Bank Balance & \pounds{bank:.1f}m \\
 \end{{center}}
 """
 
+    def _generate_captain_roi(self, captain_roi: Dict) -> str:
+        """Generate captain performance ROI subsection."""
+        if not captain_roi:
+            return ""
+        hit_rate = captain_roi.get('hit_rate', 0)
+        pts_captain = captain_roi.get('captain_points', 0)
+        pts_optimal = captain_roi.get('optimal_points', 0)
+        pts_left = captain_roi.get('points_left_on_table', 0)
+        gws = captain_roi.get('gws_counted', 0)
+        hit_color = 'fplgreen' if hit_rate >= 60 else ('gold' if hit_rate >= 40 else 'fplpink')
+        return rf"""
+\subsection{{Captain Performance}}
+\begin{{center}}
+\small
+\begin{{tabular}}{{cccc}}
+\toprule
+\textbf{{Captain Pts Earned}} & \textbf{{Optimal Captain Pts}} & \textbf{{Pts Left on Table}} & \textbf{{Hit Rate (Top-3)}} \\
+\midrule
+{pts_captain} & {pts_optimal} & \textcolor{{{hit_color}}}{{{pts_left}}} & \textcolor{{{hit_color}}}{{{hit_rate}\%}} \\
+\bottomrule
+\end{{tabular}}
+\end{{center}}
+\textit{{\small Over {gws} GWs. Hit rate = \% of weeks where captain was among top-3 starting scorers.}}
+\vspace{{0.3cm}}
+"""
+
     def generate_position_breakdown(
         self, squad_analysis: List[Dict], season_history: List[Dict] = None
     ) -> str:
@@ -507,27 +533,36 @@ Bank Balance & \pounds{bank:.1f}m \\
             "FWD": "fplpink!60",
         }
 
-        # If season_history is available, calculate contributing points (only starting XI with captain multipliers)
+        # If season_history is available, calculate contributing points
+        # Includes starters, captain multipliers, AND auto-sub bench points
         if season_history:
-            # Calculate contributing points per player
             for gw_entry in season_history:
                 squad = gw_entry.get("squad", [])
                 for player in squad:
-                    # Only count if in starting XI (position_in_squad <= 11)
+                    base_points = (
+                        player.get("stats", {}).get("event_points", 0) or 0
+                    )
+                    if base_points == 0:
+                        continue
+
                     position_in_squad = player.get("position_in_squad", 0)
+                    multiplier = player.get("multiplier", 1)
+
+                    # Starters (pos <= 11): apply captain multiplier
+                    # Bench players: count if they were auto-subbed (had points and minutes > 0)
                     if position_in_squad <= 11:
-                        base_points = (
-                            player.get("stats", {}).get("event_points", 0) or 0
-                        )
-
-                        # Apply captain multiplier (2 for captain, 3 for triple captain)
-                        multiplier = player.get("multiplier", 1)
                         points = base_points * multiplier
+                    else:
+                        # Bench player: only count if they actually got subbed in
+                        minutes = player.get("stats", {}).get("minutes", 0) or 0
+                        if minutes > 0:
+                            points = base_points
+                        else:
+                            continue
 
-                        # Get player's position directly from season_history (includes historical players)
-                        pos = player.get("position", "UNK")
-                        if pos in position_points:
-                            position_points[pos] += points
+                    pos = player.get("position", "UNK")
+                    if pos in position_points:
+                        position_points[pos] += points
         else:
             # Fallback to raw stats if season_history not available
             for player in squad_analysis:
@@ -783,14 +818,26 @@ over/under-performed relative to their schedule.}}
 
         def player_node(player: Dict, x: float, y: float) -> str:
             name = player.get("name", "Unknown")
+            # Availability indicator
+            chance = player.get("chance_of_playing_next_round")
+            avail_dot = ""
+            if chance is not None:
+                if chance == 0:
+                    avail_dot = rf"\node[circle,fill=red,inner sep=1.5pt] at ({x}+1.0,{y}+0.3) {{}};"
+                elif chance <= 50:
+                    avail_dot = rf"\node[circle,fill=orange,inner sep=1.5pt] at ({x}+1.0,{y}+0.3) {{}};"
+                elif chance <= 75:
+                    avail_dot = rf"\node[circle,fill=yellow,inner sep=1.5pt] at ({x}+1.0,{y}+0.3) {{}};"
+
             if player.get("is_captain"):
-                return rf"\node[captain] at ({x},{y}) {{\textbf{{{name} (C)}}}};"
+                node = rf"\node[captain] at ({x},{y}) {{\textbf{{{name} (C)}}}};"
             elif player.get("is_vice_captain"):
-                return rf"\node[vice] at ({x},{y}) {{{name} (VC)}};"
+                node = rf"\node[vice] at ({x},{y}) {{{name} (VC)}};"
             elif player.get("position") == "GKP":
-                return rf"\node[player,fill=fplpurple!15] at ({x},{y}) {{{name}}};"
+                node = rf"\node[player,fill=fplpurple!15] at ({x},{y}) {{{name}}};"
             else:
-                return rf"\node[player] at ({x},{y}) {{{name}}};"
+                node = rf"\node[player] at ({x},{y}) {{{name}}};"
+            return node + "\n" + avail_dot if avail_dot else node
 
         # Build nodes
         nodes = []
@@ -1851,7 +1898,11 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
         return "\n".join(sections)
 
     def generate_multi_week_strategy(
-        self, multi_week_strategy: Dict, captain_picks: List[Dict]
+        self,
+        multi_week_strategy: Dict,
+        captain_picks: List[Dict],
+        intelligence: Optional[Dict] = None,
+        intelligence_meta: Optional[Dict] = None,
     ) -> str:
         """Generate comprehensive multi-week transfer strategy section.
 
@@ -1911,6 +1962,34 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
 \end{{tikzpicture}}
 \end{{center}}
 """)
+
+        # Model confidence info box (render actual metrics)
+        mae = metrics.get('mae')
+        r2 = metrics.get('r2')
+        rmse = metrics.get('rmse')
+        if mae is not None:
+            conf_color = {
+                'high': 'fplgreen', 'medium': 'gold', 'low': 'fplpink'
+            }.get(confidence, 'fplgray')
+            sections.append(rf"""
+\begin{{center}}
+\small
+\colorbox{{{conf_color}!15}}{{\parbox{{0.85\textwidth}}{{
+\textbf{{Model Confidence: \textcolor{{{conf_color}}}{{{confidence.title()}}}}}
+\hfill MAE: {mae} \quad RMSE: {rmse} \quad R\textsuperscript{{2}}: {r2}
+}}}}
+\end{{center}}
+\vspace{{2pt}}
+""")
+
+        # Optional intelligence narrative (model-backed, section-scoped)
+        intelligence_block = self._render_intelligence_block(
+            intelligence=intelligence,
+            intelligence_meta=intelligence_meta,
+            title="Transfer Intelligence",
+        )
+        if intelligence_block:
+            sections.append(intelligence_block)
 
         # Fixture Heatmap
         fixture_analysis = multi_week_strategy.get("fixture_analysis", {})
@@ -1974,6 +2053,71 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
 
         return "\n".join(sections)
 
+    def _fixture_cell_color(self, fix: Dict) -> str:
+        """Return LaTeX color name for a single fixture based on win probability or FDR."""
+        win_prob = fix.get("win_prob")
+        if win_prob is not None:
+            if win_prob >= 0.60:
+                return "fplgreen!50"
+            elif win_prob >= 0.45:
+                return "fplgreen!25"
+            elif win_prob >= 0.35:
+                return "gold!40"
+            elif win_prob >= 0.20:
+                return "orange!40"
+            return "fplpink!40"
+        # Fallback to FDR 1-5
+        diff = fix.get("difficulty", 3)
+        if diff <= 2:
+            return "fplgreen!40"
+        elif diff == 3:
+            return "gold!40"
+        elif diff == 4:
+            return "orange!40"
+        return "fplpink!40"
+
+    def _single_fixture_cell(self, fix: Dict) -> str:
+        """Build a LaTeX cell string for a single fixture."""
+        opp = fix.get("opponent", "?")
+        venue = "H" if fix.get("is_home", False) else "A"
+        color = self._fixture_cell_color(fix)
+        win_prob = fix.get("win_prob")
+        if win_prob is not None:
+            return (
+                rf"\cellcolor{{{color}}}\shortstack{{{opp}({venue})"
+                rf"\\{{\tiny {int(win_prob * 100)}\%}}}}"
+            )
+        return rf"\cellcolor{{{color}}}{opp}({venue})"
+
+    def _build_fixture_cell(self, gw_fixes: list) -> str:
+        """Build a LaTeX cell for a gameweek slot.
+
+        Handles three cases:
+        - Empty list (BGW): gray cell with bold BGW label
+        - Single fixture: standard colored cell
+        - Two fixtures (DGW): split-color cell with both opponents stacked
+        """
+        if not gw_fixes:
+            return r"\cellcolor{gray!30}\textbf{BGW}"
+
+        if len(gw_fixes) == 1:
+            return self._single_fixture_cell(gw_fixes[0])
+
+        # DGW: stacked colorboxes, each fixture gets its own color
+        parts = [r"{\tiny\textbf{DGW}}"]
+        for fix in gw_fixes:
+            opp = fix.get("opponent", "?")
+            venue = "H" if fix.get("is_home", False) else "A"
+            color = self._fixture_cell_color(fix)
+            win_prob = fix.get("win_prob")
+            if win_prob is not None:
+                parts.append(
+                    rf"\colorbox{{{color}}}{{\strut {opp}({venue}) {{\tiny {int(win_prob * 100)}\%}}}}"
+                )
+            else:
+                parts.append(rf"\colorbox{{{color}}}{{\strut {opp}({venue})}}")
+        return r"\shortstack{" + r"\\".join(parts) + "}"
+
     def _generate_fixture_heatmap(
         self,
         fixture_analysis: Dict,
@@ -1981,27 +2125,33 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
         current_gw: int,
         horizon: int,
     ) -> str:
-        """Generate fixture difficulty heatmap for squad."""
+        """Generate fixture difficulty heatmap for squad.
+
+        Uses GW-keyed fixture data (``fixtures_by_gw``) when available so that
+        BGW and DGW weeks render in the correct column.  Falls back to the old
+        index-based ``fixtures`` list for backward compatibility.
+        """
+        num_cols = min(horizon, 5)
+        gw_columns = [current_gw + i + 1 for i in range(num_cols)]
+
         sections = []
         sections.append(
-            rf"\subsection{{Fixture Difficulty Heatmap (GW{current_gw + 1}-{current_gw + horizon})}}"
+            rf"\subsection{{Fixture Difficulty Heatmap (GW{gw_columns[0]}-{gw_columns[-1]})}}"
         )
 
-        # Build table header
         gw_headers = " & ".join(
-            [rf"\textbf{{GW{current_gw + i + 1}}}" for i in range(min(horizon, 5))]
+            [rf"\textbf{{GW{gw}}}" for gw in gw_columns]
         )
 
         sections.append(rf"""
 \begin{{center}}
 \small
-\begin{{tabular}}{{l|l|{"c" * min(horizon, 5)}|r}}
+\begin{{tabular}}{{l|l|{"c" * num_cols}|r}}
 \toprule
 \textbf{{Player}} & \textbf{{Swing}} & {gw_headers} & \textbf{{5-GW xP}} \\
 \midrule
 """)
 
-        # Sort by position (position now stored in fixture_analysis)
         sorted_players = sorted(
             fixture_analysis.items(),
             key=lambda x: {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}.get(
@@ -2009,17 +2159,11 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
             ),
         )
 
-        for pid, fix_data in sorted_players[:15]:  # Limit to 15 players
-            # Get player info from fixture_analysis (now includes player_name and position)
+        for pid, fix_data in sorted_players[:15]:
             pred_data = squad_predictions.get(pid, {})
-
-            fixtures = fix_data.get("fixtures", [])
             swing = fix_data.get("swing", "neutral")
-
-            # Get player name from fixture_analysis
             player_name = fix_data.get("player_name", f"Player {pid}")
 
-            # Swing indicator
             swing_color = (
                 "rising"
                 if swing == "improving"
@@ -2031,59 +2175,26 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
                 else (r"$\downarrow$" if swing == "worsening" else r"$\rightarrow$")
             )
 
-            # Build fixture cells
+            # Build fixture cells - prefer GW-keyed data, fall back to index
             fix_cells = []
-            for i in range(min(horizon, 5)):
-                if i < len(fixtures):
-                    fix = fixtures[i]
-                    opp = fix.get("opponent", "?")
-                    is_home = fix.get("is_home", False)
-                    diff = fix.get("difficulty", 3)
+            fixtures_by_gw = fix_data.get("fixtures_by_gw")
 
-                    # Check for Elo probabilities (Win/Draw/Loss)
-                    win_prob = fix.get("win_prob")
-
-                    if win_prob is not None:
-                        # Color based on Win Probability (Elo)
-                        # High Win % = Easy (Green)
-                        if win_prob >= 0.60:
-                            cell_color = "fplgreen!50"
-                        elif win_prob >= 0.45:
-                            cell_color = "fplgreen!25"
-                        elif win_prob >= 0.35:
-                            cell_color = "gold!40"
-                        elif win_prob >= 0.20:
-                            cell_color = "orange!40"
-                        else:
-                            cell_color = "fplpink!40"
-
-                        venue = "H" if is_home else "A"
-                        # Display Opponent overlayed with Win % probability
-                        fix_cells.append(
-                            rf"\cellcolor{{{cell_color}}}\shortstack{{{opp}({venue})\\{{\tiny {int(win_prob * 100)}\%}}}}"
-                        )
+            if fixtures_by_gw:
+                for gw_col in gw_columns:
+                    gw_fixes = fixtures_by_gw.get(gw_col, [])
+                    fix_cells.append(self._build_fixture_cell(gw_fixes))
+            else:
+                # Backward compat: old index-based fixture list
+                fixtures = fix_data.get("fixtures", [])
+                for i in range(num_cols):
+                    if i < len(fixtures):
+                        fix_cells.append(self._single_fixture_cell(fixtures[i]))
                     else:
-                        # Fallback to standard 1-5 Difficulty
-                        if diff <= 2:
-                            cell_color = "fplgreen!40"
-                        elif diff == 3:
-                            cell_color = "gold!40"
-                        elif diff == 4:
-                            cell_color = "orange!40"
-                        else:
-                            cell_color = "fplpink!40"
-
-                        venue = "H" if is_home else "A"
-                        fix_cells.append(rf"\cellcolor{{{cell_color}}}{opp}({venue})")
-                else:
-                    fix_cells.append(r"\cellcolor{gray!20}BGW")
+                        fix_cells.append(r"\cellcolor{gray!30}\textbf{BGW}")
 
             fix_str = " & ".join(fix_cells)
-
-            # Get 5-GW expected points
             cumulative = pred_data.get("cumulative", 0)
 
-            # Escape LaTeX special chars in player name
             player_name = player_name.replace("_", r"\_").replace("&", r"\&")
 
             sections.append(
@@ -2095,7 +2206,7 @@ Green bars indicate clutch playmakers (Assists > xA), while red bars show frustr
 \end{tabular}
 \end{center}
 
-\textit{\small Colors: \colorbox{fplgreen!40}{Easy (1-2)} \colorbox{gold!40}{Medium (3)} \colorbox{orange!40}{Hard (4)} \colorbox{fplpink!40}{Very Hard (5)}}
+\textit{\small Colors: \colorbox{fplgreen!50}{Easy} \colorbox{gold!40}{Medium} \colorbox{orange!40}{Hard} \colorbox{fplpink!40}{Very Hard} \quad \colorbox{gray!30}{\textbf{BGW}} = no fixture \quad \fbox{\textbf{DGW}} = two fixtures (split color)}
 """)
 
         return "\n".join(sections)
@@ -2391,6 +2502,9 @@ Conservative & {conservative.get("transfers", 1)} & 0 pts & \textcolor{{fplgreen
         if weekly_plans:
             sections.append(rf"\subsubsection*{{Recommended Sequence ({recommended.capitalize()})}}")
 
+            # Running bank balance for budget tracking
+            running_bank = rec_scenario.get("bank", mip_rec.get("bank", 0))
+
             # Filter to show only weeks with transfers or meaningful holds
             has_any_transfers = any(wp.get("transfers_in") for wp in weekly_plans)
 
@@ -2422,16 +2536,17 @@ Conservative & {conservative.get("transfers", 1)} & 0 pts & \textcolor{{fplgreen
     \item \textbf{{Action:}} Hold (bank free transfer)
     \item \textbf{{Reasoning:}} {self._escape_latex(reasoning_text)}
     \item \textbf{{FT Status:}} {ft_remaining} $\rightarrow$ {min(ft_remaining + 1, 5)} accrued
-    \item \textbf{{Squad xP:}} {expected_xp:.1f}
+    \item \textbf{{Squad xP:}} {expected_xp:.1f} \hfill \textbf{{ITB:}} \pounds{running_bank:.1f}m
 \end{{itemize}}
 """)
                     else:
-                        # Transfer week
+                        # Transfer week - update running bank
                         for i, (p_out, p_in) in enumerate(zip(transfers_out, transfers_in)):
                             out_name = self._escape_latex(p_out.get("name", "Unknown"))
                             in_name = self._escape_latex(p_in.get("name", "Unknown"))
                             out_price = p_out.get("sell_price", p_out.get("price", 0))
                             in_price = p_in.get("buy_price", p_in.get("price", 0))
+                            running_bank += out_price - in_price
 
                             # Cost indicator
                             if i < ft_used:
@@ -2449,6 +2564,9 @@ Conservative & {conservative.get("transfers", 1)} & 0 pts & \textcolor{{fplgreen
                                 sections.append(rf"    \item \textbf{{Reasoning:}} {self._escape_latex(reasoning)}")
 
                             sections.append(r"\end{itemize}")
+
+                        # Show running bank after all transfers
+                        sections.append(rf"\hfill \textbf{{ITB after transfers:}} \pounds{running_bank:.1f}m \\[2pt]")
 
                         # Captain suggestions for transfer weeks
                         captain = week_plan.get("captain", {})
@@ -2735,6 +2853,8 @@ Conservative & {conservative.get("transfers", 1)} & 0 pts & \textcolor{{fplgreen
         gw_history: List[Dict] = None,
         squad_analysis: List[Dict] = None,
         chip_analysis: Dict = None,
+        intelligence: Optional[Dict] = None,
+        intelligence_meta: Optional[Dict] = None,
     ) -> str:
         """Generate comprehensive chip usage strategy section with personalized insights.
 
@@ -2762,6 +2882,18 @@ Conservative & {conservative.get("transfers", 1)} & 0 pts & \textcolor{{fplgreen
 
         # Build chip usage map for this half
         used_chips_this_half = {c.get("name", ""): c.get("event", 0) for c in chips_used_this_half}
+
+        # Build note about other-half chips for display clarity
+        chip_name_labels = {"wildcard": "WC", "freehit": "FH", "bboost": "BB", "3xc": "TC"}
+        if not first_half:
+            first_half_used = [c for c in chips_used if c.get("event", 0) < CHIP_RESET_GW]
+        else:
+            first_half_used = []
+        if first_half_used:
+            used_strs = [f"{chip_name_labels.get(c.get('name',''), c.get('name',''))} GW{c.get('event','?')}" for c in first_half_used]
+            first_half_chips_note = rf" \\ \textit{{First half chips used: {', '.join(used_strs)}}}"
+        else:
+            first_half_chips_note = ""
 
         all_chips = ["wildcard", "freehit", "bboost", "3xc"]
         chip_labels = {
@@ -2824,6 +2956,12 @@ Unused chips do NOT carry over to the second half.
 \vspace{{0.2cm}}
 """
 
+        intelligence_summary_block = self._render_intelligence_block(
+            intelligence=intelligence,
+            intelligence_meta=intelligence_meta,
+            title="Chip Intelligence",
+        )
+
         # Get Phase 2 data if available
         phase2 = chip_analysis.get("phase2", {}) if chip_analysis else {}
         bb_projections = phase2.get("bb_projections") if phase2 else None
@@ -2854,6 +2992,15 @@ Unused chips do NOT carry over to the second half.
                 recommendation = chip_data.get("recommendation", self._get_default_chip_recommendation(chip_key, current_gw, first_half))
                 urgency = chip_data.get("urgency", "low")
 
+                # Optional intelligence override for recommendation text
+                intelligence_chip = (
+                    (intelligence or {}).get("chip_recommendations", {}).get(chip_key, {})
+                    if intelligence
+                    else {}
+                )
+                if intelligence_chip.get("recommendation"):
+                    recommendation = self._escape_latex(intelligence_chip.get("recommendation"))
+
                 # Urgency indicator
                 if urgency == "high":
                     urgency_indicator = r"\textcolor{fplpink}{\textbf{[HIGH PRIORITY]}}"
@@ -2875,6 +3022,10 @@ Unused chips do NOT carry over to the second half.
                 opp_cost = chip_data.get("opportunity_cost", {})
                 if opp_cost and opp_cost.get("description"):
                     issues_text += rf" \\ \textit{{Cost of waiting: {opp_cost['description']}}}"
+
+                if intelligence_chip.get("trigger"):
+                    trigger_text = self._escape_latex(intelligence_chip["trigger"])
+                    issues_text += rf" \\ \textit{{Trigger: {trigger_text}}}"
 
                 # Phase 2 projections content
                 phase2_content = ""
@@ -2969,6 +3120,35 @@ Unused chips do NOT carry over to the second half.
 \end{{itemize}}
 """
 
+        # Replace deterministic trigger/synergy narrative when intelligence is available
+        if intelligence:
+            action_items = [
+                rf"\item {self._escape_latex(x)}"
+                for x in (intelligence.get("actions") or [])[:4]
+                if x
+            ]
+            risk_items = [
+                rf"\item {self._escape_latex(x)}"
+                for x in (intelligence.get("risks") or [])[:4]
+                if x
+            ]
+            if action_items:
+                synergies_section = rf"""
+\subsection{{Chip Synergies}}
+\textit{{Combining chips strategically can maximize value:}}
+\begin{{itemize}}
+{chr(10).join(action_items)}
+\end{{itemize}}
+"""
+            if risk_items:
+                triggers_section = rf"""
+\subsection{{Watch For These Triggers}}
+\textit{{Events that would change chip recommendations:}}
+\begin{{itemize}}
+{chr(10).join(risk_items)}
+\end{{itemize}}
+"""
+
         # Fetch BGW/DGW data for calendar
         bgw_dgw_section = self._generate_bgw_dgw_calendar(current_gw)
 
@@ -2992,9 +3172,11 @@ Unused chips do NOT carry over to the second half.
 
 \subsection{{Current Chip Status}}
 
-\textbf{{Season Position:}} {half_label} | \textbf{{Chips Remaining:}} {chips_remaining}/{CHIPS_PER_HALF}
+\textbf{{Season Position:}} {half_label} | \textbf{{{half_label} Chips Remaining:}} {chips_remaining}/{CHIPS_PER_HALF}{first_half_chips_note}
 
 {ml_context_section}
+
+{intelligence_summary_block}
 
 {squad_issues_section}
 
@@ -3040,11 +3222,17 @@ Unused chips do NOT carry over to the second half.
     def _generate_bgw_dgw_calendar(self, current_gw: int) -> str:
         """Generate BGW/DGW calendar section."""
         try:
+            from .data_fetcher import get_bgw_dgw_gameweeks
+            from .dgw_bgw_fetcher import fetch_dgw_bgw_intelligence, merge_bgw_dgw_data
+            
             bgw_dgw_data = get_bgw_dgw_gameweeks(
                 use_cache=True, session_cache=self.session_cache
             )
-            bgws = bgw_dgw_data.get("bgw", [])
-            dgws = bgw_dgw_data.get("dgw", [])
+            predicted_data = fetch_dgw_bgw_intelligence(current_gw=current_gw, session_cache=self.session_cache)
+            merged_data = merge_bgw_dgw_data(bgw_dgw_data, predicted_data)
+            
+            bgws = merged_data.get("bgw", [])
+            dgws = merged_data.get("dgw", [])
 
             future_bgws = [b for b in bgws if b.get("gw", 0) > current_gw]
             future_dgws = [d for d in dgws if d.get("gw", 0) > current_gw]
@@ -3055,21 +3243,23 @@ Unused chips do NOT carry over to the second half.
                 for bgw in future_bgws[:3]:
                     gw = bgw.get("gw", 0)
                     teams = bgw.get("teams_missing", 0)
+                    predicted_tag = r" \textit{(predicted)}" if bgw.get("predicted") else ""
                     bgw_dgw_rows.append(
-                        rf"GW{gw} & \textcolor{{fplpink}}{{\textbf{{BGW}}}} & {teams} teams without fixtures \\"
+                        rf"GW{gw} & \textcolor{{fplpink}}{{\textbf{{BGW}}}} & {teams} teams without fixtures{predicted_tag} \\"
                     )
 
                 for dgw in future_dgws[:3]:
                     gw = dgw.get("gw", 0)
                     teams = dgw.get("teams_doubled", 0)
+                    predicted_tag = r" \textit{(predicted)}" if dgw.get("predicted") else ""
                     bgw_dgw_rows.append(
-                        rf"GW{gw} & \textcolor{{fplgreen}}{{\textbf{{DGW}}}} & {teams} teams with double fixtures \\"
+                        rf"GW{gw} & \textcolor{{fplgreen}}{{\textbf{{DGW}}}} & {teams} teams with double fixtures{predicted_tag} \\"
                     )
 
                 if bgw_dgw_rows:
                     bgw_dgw_table = "\n".join(bgw_dgw_rows)
                     return rf"""
-\textit{{Detected from fixtures data - plan your chips around these!}}
+\textit{{Detected from fixtures data and FPL community predictions - plan your chips around these!}}
 
 \begin{{center}}
 \begin{{tabular}}{{c|c|l}}
@@ -3083,8 +3273,9 @@ Unused chips do NOT carry over to the second half.
 
 \textit{{\textcolor{{fplpink}}{{BGW = Blank Gameweek}} | \textcolor{{fplgreen}}{{DGW = Double Gameweek}}}}
 """
-            return r"\textit{No confirmed BGW/DGW detected yet for remaining gameweeks.}"
-        except Exception:
+            return r"\textit{No confirmed or predicted BGW/DGW detected yet for remaining gameweeks.}"
+        except Exception as e:
+            self.logger.warning(f"Failed to generate BGW/DGW calendar: {e}")
             return r"\textit{BGW/DGW data unavailable.}"
 
     def _generate_fh_squad_section(self, fh_data: Dict) -> str:
@@ -3214,7 +3405,11 @@ Unused chips do NOT carry over to the second half.
 """
 
     def generate_insights(
-        self, squad_analysis: List[Dict], gw_history: List[Dict]
+        self,
+        squad_analysis: List[Dict],
+        gw_history: List[Dict],
+        intelligence: Optional[Dict] = None,
+        intelligence_meta: Optional[Dict] = None,
     ) -> str:
         """Generate strategic insights section based on actual squad data."""
         observations = []
@@ -3287,7 +3482,24 @@ Unused chips do NOT carry over to the second half.
         gws_remaining = 38 - gws_played
         projected_total = total_pts + (avg_per_gw * gws_remaining)
 
-        observations_str = "\n".join(observations)
+        intelligence_block = self._render_intelligence_block(
+            intelligence=intelligence,
+            intelligence_meta=intelligence_meta,
+            title="Season Intelligence",
+        )
+
+        if intelligence:
+            observation_lines = [
+                rf"\item {self._escape_latex(x)}"
+                for x in (intelligence.get("metric_highlights") or [])[:5]
+                if x
+            ]
+            if observation_lines:
+                observations_str = "\n".join(observation_lines)
+            else:
+                observations_str = "\n".join(observations)
+        else:
+            observations_str = "\n".join(observations)
 
         return rf"""
 \newpage
@@ -3299,6 +3511,8 @@ Based on your squad's actual performance data:
 \begin{{itemize}}
 {observations_str}
 \end{{itemize}}
+
+{intelligence_block}
 
 \subsection{{Projected Performance}}
 
@@ -3604,6 +3818,55 @@ Current squad selections across all teams. Bench players shown in gray.
 }}%
 \end{{center}}
 }}
+"""
+
+    def _render_intelligence_block(
+        self,
+        intelligence: Optional[Dict],
+        intelligence_meta: Optional[Dict],
+        title: str = "Intelligence Lens",
+    ) -> str:
+        """Render an optional intelligence narrative block."""
+        if not intelligence:
+            return ""
+
+        label_text = self._escape_latex(
+            (intelligence_meta or {}).get("label", "Intelligence layer enabled")
+        )
+        headline = self._escape_latex(intelligence.get("headline", ""))
+        summary = self._escape_latex(intelligence.get("tactical_summary", ""))
+        metric_highlights = [
+            self._escape_latex(x) for x in (intelligence.get("metric_highlights") or []) if x
+        ]
+        actions = [self._escape_latex(x) for x in (intelligence.get("actions") or []) if x]
+        risks = [self._escape_latex(x) for x in (intelligence.get("risks") or []) if x]
+
+        metric_items = "\n".join([rf"\item {x}" for x in metric_highlights[:5]])
+        action_items = "\n".join([rf"\item {x}" for x in actions[:4]])
+        risk_items = "\n".join([rf"\item {x}" for x in risks[:4]])
+
+        return rf"""
+\subsection{{{self._escape_latex(title)}}}
+\textit{{\small {label_text}}}
+
+\begin{{tcolorbox}}[colback=fplpurple!3,colframe=fplpurple!40,title={{\textbf{{{headline}}}}},fonttitle=\bfseries]
+{summary}
+
+\textbf{{Metric Highlights}}
+\begin{{itemize}}
+{metric_items}
+\end{{itemize}}
+
+\textbf{{Actions}}
+\begin{{itemize}}
+{action_items}
+\end{{itemize}}
+
+\textbf{{Risks}}
+\begin{{itemize}}
+{risk_items}
+\end{{itemize}}
+\end{{tcolorbox}}
 """
 
     def _escape_latex(self, text: str) -> str:
@@ -4007,7 +4270,12 @@ Starting XI across recent gameweeks. \colorbox{{rising!30}}{{\small IN}} = trans
 }}
 """
 
-    def generate_wildcard_team_section(self, wildcard_team: Dict) -> str:
+    def generate_wildcard_team_section(
+        self,
+        wildcard_team: Dict,
+        intelligence: Optional[Dict] = None,
+        intelligence_meta: Optional[Dict] = None,
+    ) -> str:
         """Generate Wildcard ideal team section.
 
         Shows optimized 15-player squad built with current budget,
@@ -4285,8 +4553,16 @@ Starting XI across recent gameweeks. \colorbox{{rising!30}}{{\small IN}} = trans
 
 """)
 
-        # Strategy note
-        sections.append(r"""
+        # Strategy note (deterministic or intelligence-powered)
+        intelligence_block = self._render_intelligence_block(
+            intelligence=intelligence,
+            intelligence_meta=intelligence_meta,
+            title="Wildcard Strategy Notes",
+        )
+        if intelligence_block:
+            sections.append(intelligence_block)
+        else:
+            sections.append(r"""
 \subsection{Strategy Notes}
 
 This Wildcard draft prioritizes \textbf{season-balanced} selection:
@@ -4302,7 +4578,12 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
 
         return "\n".join(sections)
 
-    def generate_free_hit_team_section(self, free_hit_team: Dict) -> str:
+    def generate_free_hit_team_section(
+        self,
+        free_hit_team: Dict,
+        intelligence: Optional[Dict] = None,
+        intelligence_meta: Optional[Dict] = None,
+    ) -> str:
         """Generate Free Hit draft section optimized for a single gameweek.
 
         Shows optimized 15-player squad built with current budget,
@@ -4587,7 +4868,15 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
         # =========================================================
         # STRATEGY NOTES
         # =========================================================
-        sections.append(r"""
+        intelligence_block = self._render_intelligence_block(
+            intelligence=intelligence,
+            intelligence_meta=intelligence_meta,
+            title="Free Hit Strategy Guide",
+        )
+        if intelligence_block:
+            sections.append(intelligence_block)
+        else:
+            sections.append(r"""
 \subsection{Strategy Guide}
 
 \begin{itemize}
@@ -4597,6 +4886,19 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
 \end{itemize}
 
 \textit{Note: Verify player availability and news before activating your Free Hit chip.}
+""")
+
+        # Render GW comparison plot if available
+        gw_plot = free_hit_team.get('gw_plot')
+        if gw_plot:
+            from pathlib import Path
+            plot_path = Path(gw_plot)
+            if plot_path.exists():
+                sections.append(rf"""
+\begin{{center}}
+\includegraphics[width=0.9\textwidth]{{{plot_path}}}
+\captionof{{figure}}{{Free Hit GW{target_gw} Analysis}}
+\end{{center}}
 """)
 
         return "\n".join(sections)
@@ -4812,6 +5114,9 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
         season_history: List[Dict] = None,
         top_global_data: List[Dict] = None,
         chip_analysis: Dict = None,
+        intelligence_payload: Dict = None,
+        intelligence_meta: Dict = None,
+        captain_roi: Dict = None,
     ) -> str:
         """Compile the complete LaTeX report.
 
@@ -4830,17 +5135,24 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
             free_hit_team: Optional Free Hit draft squad from FreeHitOptimizer.
             season_history: Full season history with squad data per GW.
             chip_analysis: Pre-computed chip analysis for personalized recommendations.
+            intelligence_payload: Optional section-keyed intelligence payloads.
+            intelligence_meta: Optional section-keyed intelligence metadata.
 
         Returns:
             Complete LaTeX document as string.
         """
         team_name = team_info.get("team_name", "Unknown")
         season = team_info.get("season", DEFAULT_SEASON)
+        intelligence_payload = intelligence_payload or {}
+        intelligence_meta = intelligence_meta or {}
 
         # Choose transfer strategy section based on available data
         if multi_week_strategy:
             transfer_section = self.generate_multi_week_strategy(
-                multi_week_strategy, captain_picks
+                multi_week_strategy,
+                captain_picks,
+                intelligence=intelligence_payload.get("transfer_strategy"),
+                intelligence_meta=intelligence_meta.get("transfer_strategy"),
             )
         else:
             transfer_section = self.generate_transfer_recommendations(
@@ -4852,6 +5164,7 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
             self.generate_header_footer(team_name, season),
             self.generate_title_page(team_info, gw_history),
             self.generate_season_summary(team_info, gw_history, chips_used, transfers),
+            self._generate_captain_roi(captain_roi) if captain_roi else "",
             self.generate_gw_performance_chart(gw_history),
             self.generate_rank_progression(gw_history),
             self.generate_player_points_breakdown(squad_analysis),
@@ -4866,11 +5179,23 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
 
         # Add Wildcard draft section if data is provided
         if wildcard_team:
-            parts.append(self.generate_wildcard_team_section(wildcard_team))
+            parts.append(
+                self.generate_wildcard_team_section(
+                    wildcard_team,
+                    intelligence=intelligence_payload.get("wildcard_draft"),
+                    intelligence_meta=intelligence_meta.get("wildcard_draft"),
+                )
+            )
 
         # Add Free Hit draft section if data is provided
         if free_hit_team:
-            parts.append(self.generate_free_hit_team_section(free_hit_team))
+            parts.append(
+                self.generate_free_hit_team_section(
+                    free_hit_team,
+                    intelligence=intelligence_payload.get("free_hit_draft"),
+                    intelligence_meta=intelligence_meta.get("free_hit_draft"),
+                )
+            )
 
         parts.extend(
             [
@@ -4879,8 +5204,15 @@ This Wildcard draft prioritizes \textbf{season-balanced} selection:
                     gw_history,
                     squad_analysis=squad_analysis,
                     chip_analysis=chip_analysis,
+                    intelligence=intelligence_payload.get("chip_usage_strategy"),
+                    intelligence_meta=intelligence_meta.get("chip_usage_strategy"),
                 ),
-                self.generate_insights(squad_analysis, gw_history),
+                self.generate_insights(
+                    squad_analysis,
+                    gw_history,
+                    intelligence=intelligence_payload.get("season_insights"),
+                    intelligence_meta=intelligence_meta.get("season_insights"),
+                ),
             ]
         )
 

@@ -20,6 +20,7 @@ Usage:
 import pickle
 import json
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any, Optional, Dict
 from datetime import datetime, timedelta
@@ -58,6 +59,7 @@ class SessionCacheManager:
         self.gameweek = gameweek
         self.ttl = ttl
         self.max_sessions = max_sessions
+        self._lock = threading.RLock()
         
         # Set cache directory
         if cache_dir is None:
@@ -273,7 +275,8 @@ class SessionCacheManager:
             return None
         
         key = self._generate_cache_key(cache_type, *args, **kwargs)
-        return self.cache_data.get(key)
+        with self._lock:
+            return self.cache_data.get(key)
     
     def set(self, cache_type: str, data: Any, *args, **kwargs):
         """Store data in session cache.
@@ -288,7 +291,8 @@ class SessionCacheManager:
             return
         
         key = self._generate_cache_key(cache_type, *args, **kwargs)
-        self.cache_data[key] = data
+        with self._lock:
+            self.cache_data[key] = data
     
     def save(self):
         """Save session cache to disk.
@@ -320,14 +324,13 @@ class SessionCacheManager:
         """Invalidate and delete the current session cache."""
         if not self.enabled:
             return
-        
-        self.cache_data.clear()
-        
-        if self.session_file.exists():
-            try:
-                self.session_file.unlink()
-            except Exception as e:
-                print(f"[WARN] Failed to delete session file: {e}")
+        with self._lock:
+            self.cache_data.clear()
+            if self.session_file.exists():
+                try:
+                    self.session_file.unlink()
+                except Exception as e:
+                    print(f"[WARN] Failed to delete session file: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics.
@@ -337,39 +340,39 @@ class SessionCacheManager:
         """
         if not self.enabled:
             return {'enabled': False}
-        
-        # Count entries by cache type
-        type_counts = {}
-        for key in self.cache_data.keys():
-            cache_type = key.split('|')[0] if '|' in key else 'unknown'
-            type_counts[cache_type] = type_counts.get(cache_type, 0) + 1
-        
-        # Get session file info
-        session_size = 0
-        session_exists = False
-        if self.session_file.exists():
-            session_exists = True
-            session_size = self.session_file.stat().st_size
-        
-        # Count total sessions in cache dir
-        if self.single_file:
-            all_sessions = [self.session_file] if self.session_file.exists() else []
-        else:
-            all_sessions = list(self.cache_dir.glob("session_*.pkl"))
-        
-        return {
-            'enabled': True,
-            'session_id': self.session_id,
-            'team_id': self.team_id,
-            'gameweek': self.gameweek,
-            'entries_in_memory': len(self.cache_data),
-            'entries_by_type': type_counts,
-            'session_file_exists': session_exists,
-            'session_size_bytes': session_size,
-            'session_size_mb': round(session_size / (1024 * 1024), 2),
-            'total_sessions_on_disk': len(all_sessions),
-            'cache_dir': str(self.cache_dir)
-        }
+        with self._lock:
+            # Count entries by cache type
+            type_counts = {}
+            for key in self.cache_data.keys():
+                cache_type = key.split('|')[0] if '|' in key else 'unknown'
+                type_counts[cache_type] = type_counts.get(cache_type, 0) + 1
+            
+            # Get session file info
+            session_size = 0
+            session_exists = False
+            if self.session_file.exists():
+                session_exists = True
+                session_size = self.session_file.stat().st_size
+            
+            # Count total sessions in cache dir
+            if self.single_file:
+                all_sessions = [self.session_file] if self.session_file.exists() else []
+            else:
+                all_sessions = list(self.cache_dir.glob("session_*.pkl"))
+            
+            return {
+                'enabled': True,
+                'session_id': self.session_id,
+                'team_id': self.team_id,
+                'gameweek': self.gameweek,
+                'entries_in_memory': len(self.cache_data),
+                'entries_by_type': type_counts,
+                'session_file_exists': session_exists,
+                'session_size_bytes': session_size,
+                'session_size_mb': round(session_size / (1024 * 1024), 2),
+                'total_sessions_on_disk': len(all_sessions),
+                'cache_dir': str(self.cache_dir)
+            }
     
     @staticmethod
     def cleanup_all_expired(cache_dir: Optional[Path] = None, ttl: int = 3600):

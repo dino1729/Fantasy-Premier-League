@@ -56,6 +56,9 @@ class DummyFetcher:
     def get_upcoming_fixtures(self, team_id: int, num_fixtures: int = 5):
         return [{"gameweek": 6, "opponent": "ARS", "is_home": True, "difficulty": 2}]
 
+    def get_fixtures_by_gw(self, team_id: int, start_gw: int, end_gw: int):
+        return {gw: [] for gw in range(start_gw, end_gw + 1)}
+
     def get_position_peers(self, position: str, min_minutes: int = 90) -> pd.DataFrame:
         return pd.DataFrame()
 
@@ -3709,8 +3712,462 @@ class TestFPLCorePredictorCrossSeasonTraining(unittest.TestCase):
         self.assertIsInstance(cross_season['prev_season_samples'], int)
         self.assertIsInstance(cross_season['current_season_samples'], int)
 
+class TestIntelligenceSectionRendering(unittest.TestCase):
+    """Tests for optional intelligence-driven report rendering."""
+
+    def setUp(self):
+        self.generator = LaTeXReportGenerator(team_id=847569, gameweek=17, plot_dir=Path("plots"))
+
+    def _build_base_inputs(self):
+        team_info = {
+            "team_name": "My Team",
+            "manager_name": "Manager",
+            "overall_points": 1500,
+            "overall_rank": 12345,
+            "season": "2025-26",
+        }
+        gw_history = [
+            {"event": 16, "points": 60, "total_points": 1440, "overall_rank": 14000},
+            {"event": 17, "points": 60, "total_points": 1500, "overall_rank": 12345},
+        ]
+        squad = [
+            {"id": 1, "name": "Alpha", "position": "MID", "position_in_squad": 1, "is_captain": True, "is_vice_captain": False}
+        ]
+        squad_analysis = [
+            {
+                "player_id": 1,
+                "name": "Alpha",
+                "position": "MID",
+                "position_in_squad": 1,
+                "raw_stats": {"total_points": 120},
+                "form_analysis": {"average": 6.2, "trend": "rising"},
+                "expected_vs_actual": {"expected_goals": 2.0, "goals_diff": -0.5},
+            },
+            {
+                "player_id": 2,
+                "name": "Bravo",
+                "position": "FWD",
+                "position_in_squad": 12,
+                "raw_stats": {"total_points": 90},
+                "form_analysis": {"average": 4.1, "trend": "falling"},
+                "expected_vs_actual": {"expected_goals": 1.2, "goals_diff": 0.3},
+            },
+        ]
+        captain_picks = [{"name": "Alpha", "position": "MID", "reasons": ["High xP"]}]
+        chips_used = []
+        transfers = []
+        multi_week_strategy = {
+            "current_gameweek": 17,
+            "planning_horizon": 5,
+            "expected_value": {"current_squad": 52.0, "optimized_squad": 58.5, "potential_gain": 6.5},
+            "fixture_analysis": {},
+            "squad_predictions": {},
+            "immediate_recommendations": [],
+            "planned_transfers": [],
+            "alternative_strategies": {},
+            "model_metrics": {"mae": 2.5, "r2": 0.2},
+            "model_confidence": "medium",
+            "mip_recommendation": None,
+        }
+        wildcard_team = {
+            "budget": {"total": 100.0, "spent": 99.0, "remaining": 1.0},
+            "squad": [{"name": "WC Player", "position": "MID", "team": "ARS", "team_id": 1, "price": 8.0, "score": 70.0}],
+            "starting_xi": [{"name": "WC Player", "position": "MID", "team": "ARS", "price": 8.0, "xp_5gw": 28.0, "score": 70.0, "ppg": 5.5, "fixtures": []}],
+            "bench": [],
+            "formation": "3-5-2",
+            "captain": {"name": "WC Player"},
+            "vice_captain": {"name": "WC Player"},
+            "ev_analysis": {"current_squad_xp": 52.0, "optimized_xp": 58.0, "potential_gain": 6.0, "horizon": "5 GWs"},
+        }
+        free_hit_team = {
+            "budget": {"total": 100.0, "spent": 99.0, "remaining": 1.0},
+            "squad": [{"name": "FH Player", "position": "MID", "team": "LIV", "team_id": 2, "price": 9.0, "score": 75.0, "ep_next": 7.5, "league_ownership": 30.0}],
+            "starting_xi": [{"name": "FH Player", "position": "MID", "team": "LIV", "price": 9.0, "ep_next": 7.5, "league_ownership": 30.0, "fixtures": []}],
+            "bench": [],
+            "formation": "3-5-2",
+            "captain": {"name": "FH Player"},
+            "vice_captain": {"name": "FH Player"},
+            "target_gw": 18,
+            "strategy": "balanced",
+            "league_analysis": {"sample_size": 10, "differentials": [], "template_picks": []},
+            "ev_analysis": {"current_squad_xp": 48.0, "optimized_xp": 54.0, "potential_gain": 6.0},
+        }
+        chip_analysis = {
+            "current_gw": 17,
+            "half": "first",
+            "chips_remaining_display": "3/4",
+            "squad_issues": {"total_issues": 0, "summary": "No major issues"},
+            "chips": {
+                "wildcard": {"urgency": "medium", "recommendation": "Use before GW20"},
+                "freehit": {"urgency": "low", "recommendation": "Save for BGW"},
+                "bboost": {"urgency": "low", "recommendation": "Target DGW"},
+                "3xc": {"urgency": "low", "recommendation": "Use in DGW"},
+            },
+            "triggers": ["DGW announcement", "Injury cluster"],
+            "phase2": {},
+        }
+        return {
+            "team_info": team_info,
+            "gw_history": gw_history,
+            "squad": squad,
+            "squad_analysis": squad_analysis,
+            "recommendations": [],
+            "captain_picks": captain_picks,
+            "chips_used": chips_used,
+            "transfers": transfers,
+            "multi_week_strategy": multi_week_strategy,
+            "wildcard_team": wildcard_team,
+            "free_hit_team": free_hit_team,
+            "season_history": [],
+            "chip_analysis": chip_analysis,
+        }
+
+    def _build_intelligence_payload(self):
+        base = {
+            "headline": "AI Headline",
+            "tactical_summary": "AI tactical summary with metric anchors.",
+            "metric_highlights": ["+6.5 xP over 5 GWs", "3 chips remaining before reset"],
+            "actions": ["Prioritize one immediate transfer", "Preserve captaincy upside"],
+            "risks": ["Late injury changes can alter expected gain"],
+        }
+        chip_payload = dict(base)
+        chip_payload["chip_recommendations"] = {
+            "wildcard": {"recommendation": "Wildcard if two starters are flagged.", "trigger": "Two injuries in starting XI"},
+            "freehit": {"recommendation": "Free Hit on largest BGW.", "trigger": "6+ expected blanks"},
+            "bboost": {"recommendation": "Bench Boost on DGW with deep bench.", "trigger": "4 bench doubles"},
+            "3xc": {"recommendation": "Triple Captain premium with two fixtures.", "trigger": "Confirmed DGW for premium attacker"},
+        }
+        payload = {
+            "transfer_strategy": dict(base),
+            "wildcard_draft": dict(base),
+            "free_hit_draft": dict(base),
+            "chip_usage_strategy": chip_payload,
+            "season_insights": dict(base),
+        }
+        meta = {
+            key: {"label": "Intelligence layer enabled - model: gpt-5.2"}
+            for key in payload.keys()
+        }
+        return payload, meta
+
+    def test_compile_report_uses_intelligence_payload_for_all_sections(self):
+        """compile_report should inject intelligence narratives for all five sections."""
+        inputs = self._build_base_inputs()
+        payload, meta = self._build_intelligence_payload()
+
+        latex = self.generator.compile_report(
+            **inputs,
+            intelligence_payload=payload,
+            intelligence_meta=meta,
+        )
+
+        self.assertIn("Transfer Intelligence", latex)
+        self.assertIn("Wildcard Strategy Notes", latex)
+        self.assertIn("Free Hit Strategy Guide", latex)
+        self.assertIn("Chip Intelligence", latex)
+        self.assertIn("Season Intelligence", latex)
+        self.assertIn("Intelligence layer enabled - model: gpt-5.2", latex)
+        self.assertIn("Wildcard if two starters are flagged.", latex)
+
+    def test_compile_report_uses_deterministic_when_section_payload_missing(self):
+        """Missing section payload should fall back to deterministic section content."""
+        inputs = self._build_base_inputs()
+        payload, meta = self._build_intelligence_payload()
+        payload = {"transfer_strategy": payload["transfer_strategy"]}
+        meta = {"transfer_strategy": meta["transfer_strategy"]}
+
+        latex = self.generator.compile_report(
+            **inputs,
+            intelligence_payload=payload,
+            intelligence_meta=meta,
+        )
+
+        self.assertIn("Transfer Intelligence", latex)
+        self.assertIn(r"\subsection{Strategy Notes}", latex)
+        self.assertIn(r"\subsection{Strategy Guide}", latex)
+        self.assertIn("This Wildcard draft prioritizes", latex)
+
+
+class TestFixtureHeatmapBgwDgw(unittest.TestCase):
+    """Tests for BGW/DGW handling in the fixture difficulty heatmap."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        df = pd.DataFrame(columns=["id", "web_name", "team", "element_type"])
+        self.generator = LaTeXReportGenerator(
+            DummyFetcher(df), DummyAnalyzer(), self.temp_dir
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_fix(self, opp="ARS", is_home=True, win_prob=0.55, difficulty=2):
+        return {
+            "opponent": opp,
+            "is_home": is_home,
+            "difficulty": difficulty,
+            "win_prob": win_prob,
+        }
+
+    def test_bgw_column_alignment(self):
+        """BGW in the middle of the horizon renders in the correct column."""
+        fixtures_by_gw = {
+            11: [self._make_fix("ARS")],
+            12: [],  # BGW
+            13: [self._make_fix("CHE")],
+            14: [self._make_fix("TOT")],
+            15: [self._make_fix("LIV")],
+        }
+        fixture_analysis = {
+            1: {
+                "player_name": "Salah",
+                "position": "MID",
+                "fixtures_by_gw": fixtures_by_gw,
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 30.0}}, current_gw=10, horizon=5
+        )
+        # BGW should appear in GW12 column (2nd), not at the end
+        # Split by & to check column positions
+        lines = [l for l in result.split("\n") if "Salah" in l]
+        self.assertEqual(len(lines), 1)
+        cells = lines[0].split("&")
+        # cells: [player, swing, GW11, GW12, GW13, GW14, GW15, xP]
+        self.assertIn("ARS", cells[2])   # GW11
+        self.assertIn("BGW", cells[3])   # GW12 - the blank
+        self.assertIn("CHE", cells[4])   # GW13
+
+    def test_dgw_cell_shows_two_opponents(self):
+        """DGW cell shows both opponent codes."""
+        fixtures_by_gw = {
+            11: [self._make_fix("ARS", True, 0.65), self._make_fix("CHE", False, 0.30)],
+            12: [self._make_fix("TOT")],
+            13: [self._make_fix("LIV")],
+            14: [self._make_fix("MCI")],
+            15: [self._make_fix("BOU")],
+        }
+        fixture_analysis = {
+            1: {
+                "player_name": "Haaland",
+                "position": "FWD",
+                "fixtures_by_gw": fixtures_by_gw,
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 35.0}}, current_gw=10, horizon=5
+        )
+        lines = [l for l in result.split("\n") if "Haaland" in l]
+        self.assertEqual(len(lines), 1)
+        cells = lines[0].split("&")
+        dgw_cell = cells[2]  # GW11 column
+        self.assertIn("ARS", dgw_cell)
+        self.assertIn("CHE", dgw_cell)
+        self.assertIn("DGW", dgw_cell)
+
+    def test_dgw_cell_split_colors(self):
+        """Each fixture in a DGW cell gets its own color via colorbox."""
+        easy_fix = self._make_fix("BOU", True, 0.70, 1)
+        hard_fix = self._make_fix("MCI", False, 0.15, 5)
+        fixtures_by_gw = {
+            11: [easy_fix, hard_fix],
+            12: [self._make_fix()],
+            13: [self._make_fix()],
+            14: [self._make_fix()],
+            15: [self._make_fix()],
+        }
+        fixture_analysis = {
+            1: {
+                "player_name": "Palmer",
+                "position": "MID",
+                "fixtures_by_gw": fixtures_by_gw,
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 28.0}}, current_gw=10, horizon=5
+        )
+        lines = [l for l in result.split("\n") if "Palmer" in l]
+        dgw_cell = lines[0].split("&")[2]
+        # Should have two separate colorbox commands with different colors
+        self.assertIn("fplgreen", dgw_cell)  # Easy fixture
+        self.assertIn("fplpink", dgw_cell)   # Hard fixture
+        # Both should use \colorbox (split coloring)
+        self.assertEqual(dgw_cell.count(r"\colorbox"), 2)
+
+    def test_normal_gw_unaffected(self):
+        """Standard single-fixture weeks render the same as before."""
+        fixtures_by_gw = {
+            11: [self._make_fix("ARS", True, 0.55)],
+            12: [self._make_fix("CHE", False, 0.40)],
+            13: [self._make_fix("TOT", True, 0.50)],
+            14: [self._make_fix("LIV", False, 0.25)],
+            15: [self._make_fix("MCI", True, 0.60)],
+        }
+        fixture_analysis = {
+            1: {
+                "player_name": "Saka",
+                "position": "MID",
+                "fixtures_by_gw": fixtures_by_gw,
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 25.0}}, current_gw=10, horizon=5
+        )
+        # No BGW or DGW markers
+        lines = [l for l in result.split("\n") if "Saka" in l]
+        row = lines[0]
+        self.assertNotIn("BGW", row)
+        self.assertNotIn("DGW", row)
+        # All 5 opponents present
+        for opp in ["ARS", "CHE", "TOT", "LIV", "MCI"]:
+            self.assertIn(opp, row)
+
+    def test_legend_includes_bgw_dgw(self):
+        """Legend includes BGW and DGW markers."""
+        fixture_analysis = {
+            1: {
+                "player_name": "Test",
+                "position": "MID",
+                "fixtures_by_gw": {gw: [self._make_fix()] for gw in range(11, 16)},
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 10.0}}, current_gw=10, horizon=5
+        )
+        self.assertIn("BGW", result)
+        self.assertIn("DGW", result)
+        self.assertIn("no fixture", result)
+        self.assertIn("two fixtures", result)
+
+    def test_backward_compat_no_fixtures_by_gw(self):
+        """Falls back to index-based rendering when fixtures_by_gw is absent."""
+        fixture_analysis = {
+            1: {
+                "player_name": "OldData",
+                "position": "MID",
+                "fixtures": [self._make_fix("ARS"), self._make_fix("CHE")],
+                "swing": "neutral",
+            }
+        }
+        result = self.generator._generate_fixture_heatmap(
+            fixture_analysis, {1: {"cumulative": 15.0}}, current_gw=10, horizon=5
+        )
+        lines = [l for l in result.split("\n") if "OldData" in l]
+        row = lines[0]
+        self.assertIn("ARS", row)
+        self.assertIn("CHE", row)
+        # Remaining 3 columns should show BGW (list exhaustion fallback)
+        self.assertEqual(row.count("BGW"), 3)
+
+
+class TestGetFixturesByGw(unittest.TestCase):
+    """Tests for FPLDataFetcher.get_fixtures_by_gw."""
+
+    def _make_fetcher_with_difficulties(self, team_fixtures_dict):
+        """Create a FPLDataFetcher mock with controlled fixture difficulties."""
+        df = pd.DataFrame(columns=["id", "web_name", "team", "element_type"])
+        fetcher = DummyFetcher(df)
+        mock_calc = MagicMock()
+        mock_calc.get_fixture_difficulties.return_value = team_fixtures_dict
+        fetcher._difficulty_calculator = mock_calc
+        # Bind the real method to the dummy fetcher
+        from reports.fpl_report.data_fetcher import FPLDataFetcher
+        fetcher.get_fixtures_by_gw = FPLDataFetcher.get_fixtures_by_gw.__get__(
+            fetcher, type(fetcher)
+        )
+        return fetcher
+
+    def test_bgw_returns_empty_list(self):
+        """Team with no fixture in a GW gets an empty list for that key."""
+        team_fixtures = {
+            1: [
+                {"gameweek": 29, "opponent": "ARS", "is_home": True,
+                 "fdr_elo": 2, "fdr_original": 2,
+                 "win_prob": 0.55, "draw_prob": 0.25, "loss_prob": 0.20},
+                # No GW30 fixture
+                {"gameweek": 31, "opponent": "CHE", "is_home": False,
+                 "fdr_elo": 4, "fdr_original": 4,
+                 "win_prob": 0.30, "draw_prob": 0.30, "loss_prob": 0.40},
+            ]
+        }
+        fetcher = self._make_fetcher_with_difficulties(team_fixtures)
+        result = fetcher.get_fixtures_by_gw(1, 29, 31)
+        self.assertEqual(len(result[29]), 1)
+        self.assertEqual(len(result[30]), 0)  # BGW
+        self.assertEqual(len(result[31]), 1)
+
+    def test_dgw_returns_two_fixtures(self):
+        """Team with two fixtures in a GW gets a two-element list."""
+        team_fixtures = {
+            1: [
+                {"gameweek": 29, "opponent": "ARS", "is_home": True,
+                 "fdr_elo": 2, "fdr_original": 2,
+                 "win_prob": 0.55, "draw_prob": 0.25, "loss_prob": 0.20},
+                {"gameweek": 29, "opponent": "CHE", "is_home": False,
+                 "fdr_elo": 4, "fdr_original": 4,
+                 "win_prob": 0.30, "draw_prob": 0.30, "loss_prob": 0.40},
+            ]
+        }
+        fetcher = self._make_fetcher_with_difficulties(team_fixtures)
+        result = fetcher.get_fixtures_by_gw(1, 29, 29)
+        self.assertEqual(len(result[29]), 2)
+        opponents = {f["opponent"] for f in result[29]}
+        self.assertEqual(opponents, {"ARS", "CHE"})
+
+    def test_no_calculator_returns_empty(self):
+        """Returns all-empty dict when difficulty calculator is None."""
+        df = pd.DataFrame(columns=["id", "web_name", "team", "element_type"])
+        fetcher = DummyFetcher(df)
+        fetcher._difficulty_calculator = None
+        from reports.fpl_report.data_fetcher import FPLDataFetcher
+        fetcher.get_fixtures_by_gw = FPLDataFetcher.get_fixtures_by_gw.__get__(
+            fetcher, type(fetcher)
+        )
+        result = fetcher.get_fixtures_by_gw(1, 29, 31)
+        for gw in range(29, 32):
+            self.assertEqual(result[gw], [])
+
+
+class TestBgwDgwDetection(unittest.TestCase):
+    """Tests for get_bgw_dgw_gameweeks elif bugfix."""
+
+    @patch("reports.fpl_report.data_fetcher.get_fixtures_data")
+    def test_mixed_gw_both_bgw_and_dgw(self, mock_fixtures):
+        """A GW with some teams blanking AND some doubled produces both entries."""
+        from reports.fpl_report.data_fetcher import get_bgw_dgw_gameweeks
+
+        # GW29: teams 1-18 play normally (9 matches), team 19+20 have no fixture (BGW)
+        # Plus team 1 has a second match (DGW for team 1)
+        fixtures = []
+        for i in range(1, 19, 2):
+            fixtures.append({"event": 29, "team_h": i, "team_a": i + 1})
+        # Extra match for team 1 (DGW)
+        fixtures.append({"event": 29, "team_h": 1, "team_a": 3})
+
+        mock_fixtures.return_value = fixtures
+        result = get_bgw_dgw_gameweeks(use_cache=False)
+
+        bgw_gws = [entry["gw"] for entry in result["bgw"]]
+        dgw_gws = [entry["gw"] for entry in result["dgw"]]
+
+        # GW29 should appear in BOTH lists
+        self.assertIn(29, bgw_gws)
+        self.assertIn(29, dgw_gws)
+
+        # Verify details
+        bgw_entry = [e for e in result["bgw"] if e["gw"] == 29][0]
+        self.assertIn(19, bgw_entry["team_ids"])
+        self.assertIn(20, bgw_entry["team_ids"])
+
+        dgw_entry = [e for e in result["dgw"] if e["gw"] == 29][0]
+        self.assertIn(1, dgw_entry["team_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()
-
 

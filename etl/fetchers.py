@@ -14,6 +14,7 @@ import json
 import os
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -385,10 +386,17 @@ class FixtureDifficultyCalculator:
         self.fpl = fpl_fetcher
         self.elo = elo_fetcher
     
-    def get_fixture_difficulties(self, for_date: Optional[date] = None
+    def get_fixture_difficulties(self, for_date: Optional[date] = None,
+                                  current_gw_override: Optional[int] = None
                                   ) -> Dict[int, List[Dict]]:
         """Calculate Elo-based difficulties for all upcoming fixtures.
-        
+
+        Args:
+            for_date: Date for Elo ratings lookup.
+            current_gw_override: If provided, use this as the current GW
+                instead of auto-detecting from the API.  Fixtures in GWs
+                ``<= current_gw_override`` are excluded.
+
         Returns:
             Dict mapping team_id -> list of fixture dicts with:
             - gameweek, opponent, is_home
@@ -398,7 +406,7 @@ class FixtureDifficultyCalculator:
         """
         fixtures = self.fpl.get_fixtures(save_raw=False)
         elo_ratings = self.elo.get_ratings(for_date)
-        current_gw = self.fpl.get_current_gameweek()
+        current_gw = current_gw_override if current_gw_override is not None else self.fpl.get_current_gameweek()
         
         # Build team name map
         bootstrap = self.fpl.get_bootstrap_static(save_raw=False)
@@ -738,23 +746,36 @@ class FPLCoreInsightsFetcher:
             Dict mapping gameweek number -> dict of dataset DataFrames
         """
         logger.info(f"Fetching all gameweek data from GW1 to GW{up_to_gw}...")
-        
-        all_gw_data = {}
-        for gw in range(1, up_to_gw + 1):
+
+        def _fetch_single_gameweek(gw: int) -> Dict[str, Optional[pd.DataFrame]]:
             logger.info(f"Fetching GW{gw} data...")
             gw_data = {}
-            
             for dataset in self.GW_DATASETS:
                 df = self._download_csv(dataset, gw, force_refresh)
                 gw_data[dataset] = df
-            
-            all_gw_data[gw] = gw_data
-            
-            # Log summary
-            successful = sum(1 for df in gw_data.values() if df is not None)
-            logger.info(f"  GW{gw}: {successful}/{len(self.GW_DATASETS)} datasets fetched")
-        
-        return all_gw_data
+            return gw_data
+
+        all_gw_data: Dict[int, Dict[str, Optional[pd.DataFrame]]] = {}
+        max_workers = max(1, min(8, up_to_gw))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_gw = {
+                executor.submit(_fetch_single_gameweek, gw): gw
+                for gw in range(1, up_to_gw + 1)
+            }
+            for future in as_completed(future_to_gw):
+                gw = future_to_gw[future]
+                try:
+                    gw_data = future.result()
+                except Exception as exc:
+                    logger.warning(f"  GW{gw}: fetch failed ({exc})")
+                    gw_data = {dataset: None for dataset in self.GW_DATASETS}
+                all_gw_data[gw] = gw_data
+
+                successful = sum(1 for df in gw_data.values() if df is not None)
+                logger.info(f"  GW{gw}: {successful}/{len(self.GW_DATASETS)} datasets fetched")
+
+        return dict(sorted(all_gw_data.items(), key=lambda item: item[0]))
     
     def get_cache_info(self, gameweek: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
         """Get information about cached datasets.

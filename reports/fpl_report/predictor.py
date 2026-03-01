@@ -86,6 +86,7 @@ class FPLPointsPredictor:
             'avg_minutes_last_4',
             'avg_ict_last_4',
             'avg_bonus_last_4',
+            'avg_bps_last_4',
             # Expected stats (key for predicting future points)
             'avg_xg_last_4',
             'avg_xa_last_4',
@@ -106,6 +107,8 @@ class FPLPointsPredictor:
             # Team quality (affects overall performance)
             'team_attack_strength',
             'opp_defense_strength',
+            'team_defense_strength',
+            'opp_attack_strength',
             # Form momentum
             'form_trend',
             'minutes_trend',
@@ -256,6 +259,36 @@ class FPLPointsPredictor:
             return float(away_fix.iloc[0]['team_a_difficulty']), 0, team_id, opp_id
             
         return 3.0, 0, team_id, 0
+
+    def _get_gw_fixtures(self, player_id: int, gameweek: int) -> List[Tuple[float, int, int, int]]:
+        """Get all fixtures for a player's team in a specific GW.
+
+        Returns a list of (fdr, is_home, team_id, opp_id) tuples.
+        Empty list = BGW, single element = normal GW, two elements = DGW.
+        """
+        player_stats = self.fetcher.get_player_stats(player_id)
+        team_id = player_stats.get('team')
+        if not team_id:
+            return []
+
+        # Use the GW-keyed fixture method that correctly detects BGW/DGW
+        if hasattr(self.fetcher, 'get_fixtures_by_gw'):
+            fixtures_by_gw = self.fetcher.get_fixtures_by_gw(team_id, gameweek, gameweek)
+            gw_fixtures = fixtures_by_gw.get(gameweek, [])
+
+            result = []
+            for fix in gw_fixtures:
+                fdr = fix.get('difficulty', 3.0)
+                is_home = 1 if fix.get('is_home', False) else 0
+                opp_id = fix.get('opponent', 0)
+                result.append((fdr, is_home, team_id, opp_id))
+            return result
+
+        # Fallback to legacy single-fixture method
+        fdr, is_home, tid, opp_id = self._get_fixture_difficulty(player_id, gameweek)
+        if opp_id == 0 and tid == 0:
+            return []
+        return [(fdr, is_home, tid, opp_id)]
 
     def build_training_dataset(self, player_ids: List[int], current_gw: int) -> pd.DataFrame:
         """Build dataset for training the model.
@@ -432,159 +465,149 @@ class FPLPointsPredictor:
             print(f"Model trained (training set only). R²: {self.metrics['r2']}")
 
     def predict(self, player_ids: List[int]) -> Dict[int, float]:
-        """Predict points for next gameweek for given players."""
+        """Predict points for next gameweek for given players.
+
+        BGW-aware: returns 0.0 for players with no fixture.
+        DGW-aware: sums predictions for both fixtures.
+        """
         if not self.is_trained:
             print("Model not trained yet.")
             return {}
-            
+
         current_gw = self.fetcher.get_current_gameweek()
         next_gw = current_gw + 1
-        
+
         self._calculate_team_strength()
         pos_map = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
-        
+
         predictions = {}
-        prediction_data = []
-        pids_map = []
-        
+
         for pid in player_ids:
             history = self.fetcher.get_player_history(pid)
             if history.empty:
                 predictions[pid] = 0.0
                 continue
-                
+
             player_stats = self.fetcher.get_player_stats(pid)
             position = pos_map.get(player_stats.get('element_type', 3), 'MID')
-            
+            value = float(player_stats.get('now_cost', 0)) / 10.0
+
             rolling_stats = self._get_rolling_stats(history, next_gw, position=position)
             if not rolling_stats:
                 predictions[pid] = 0.0
                 continue
-                
-            value = float(player_stats.get('now_cost', 0)) / 10.0
-            selected_pct = float(player_stats.get('selected_by_percent', 0) or 0)
-            fdr, is_home, team_id, opp_id = self._get_fixture_difficulty(pid, next_gw)
-            
-            team_str = self._team_strength.get(team_id, {'attack': 1.5, 'defense': 1.5})
-            opp_str = self._team_strength.get(opp_id, {'attack': 1.5, 'defense': 1.5})
-            
-            row = rolling_stats.copy()
-            row['value'] = value
-            row['selected_pct'] = selected_pct
-            row['fixture_difficulty'] = fdr
-            row['is_home'] = is_home
-            row['is_gkp'] = 1 if position == 'GKP' else 0
-            row['is_def'] = 1 if position == 'DEF' else 0
-            row['is_mid'] = 1 if position == 'MID' else 0
-            row['is_fwd'] = 1 if position == 'FWD' else 0
-            row['team_attack_strength'] = team_str['attack']
-            row['team_defense_strength'] = team_str['defense']
-            row['opp_attack_strength'] = opp_str['attack']
-            row['opp_defense_strength'] = opp_str['defense']
-            
-            prediction_data.append(row)
-            pids_map.append(pid)
-            
-        if not prediction_data:
-            return predictions
-            
-        X_pred = pd.DataFrame(prediction_data)
-        
-        # Ensure all columns exist
+
+            # Get all fixtures for next GW (handles BGW/DGW)
+            gw_fixtures = self._get_gw_fixtures(pid, next_gw)
+
+            if not gw_fixtures:
+                predictions[pid] = 0.0
+                continue
+
+            # Sum predictions across all fixtures
+            total = 0.0
+            for fdr, is_home, team_id, opp_id in gw_fixtures:
+                pred = self._predict_single_fixture(
+                    rolling_stats, value, position,
+                    fdr, is_home, team_id, opp_id
+                )
+                total += max(0, pred)
+
+            predictions[pid] = round(total, 2)
+
+        return predictions
+
+    def _predict_single_fixture(self, rolling_stats: Dict, value: float,
+                                position: str, fdr: float, is_home: int,
+                                team_id: int, opp_id: int) -> float:
+        """Predict points for a single fixture context.
+
+        Shared by predict(), predict_multiple_gws(), and DGW summing logic.
+        """
+        team_str = self._team_strength.get(team_id, {'attack': 1.5, 'defense': 1.5})
+        opp_str = self._team_strength.get(opp_id, {'attack': 1.5, 'defense': 1.5})
+
+        row = rolling_stats.copy()
+        row['value'] = value
+        row['fixture_difficulty'] = fdr
+        row['is_home'] = is_home
+        row['is_gkp'] = 1 if position == 'GKP' else 0
+        row['is_def'] = 1 if position == 'DEF' else 0
+        row['is_mid'] = 1 if position == 'MID' else 0
+        row['is_fwd'] = 1 if position == 'FWD' else 0
+        row['team_attack_strength'] = team_str['attack']
+        row['team_defense_strength'] = team_str['defense']
+        row['opp_attack_strength'] = opp_str['attack']
+        row['opp_defense_strength'] = opp_str['defense']
+
+        X_pred = pd.DataFrame([row])
         for col in self.feature_cols:
             if col not in X_pred.columns:
                 X_pred[col] = 0.0
-                
         X_pred = X_pred[self.feature_cols].fillna(0)
         X_scaled = self.scaler.transform(X_pred)
-        
-        # Ensemble prediction
+
         if self.use_ensemble:
-            preds_gb = self.gb_model.predict(X_scaled)
-            preds_rf = self.rf_model.predict(X_scaled)
-            preds = (preds_gb + preds_rf) / 2
-        else:
-            preds = self.gb_model.predict(X_scaled)
-        
-        for i, pid in enumerate(pids_map):
-            predictions[pid] = round(max(0, preds[i]), 2)
-            
-        return predictions
+            pred_gb = self.gb_model.predict(X_scaled)[0]
+            pred_rf = self.rf_model.predict(X_scaled)[0]
+            return (pred_gb + pred_rf) / 2
+        return self.gb_model.predict(X_scaled)[0]
 
     def predict_multiple_gws(self, player_ids: List[int], num_gws: int = 5) -> Dict[int, Dict]:
         """Predict points for multiple upcoming gameweeks.
-        
-        For each player, predicts expected points for the next N gameweeks,
-        along with cumulative totals and confidence intervals.
+
+        BGW-aware: returns 0.0 for gameweeks where a player has no fixture.
+        DGW-aware: sums predictions for both fixtures in a double gameweek.
         """
         if not self.is_trained:
             print("Model not trained yet.")
             return {}
-            
+
         current_gw = self.fetcher.get_current_gameweek()
         self._calculate_team_strength()
         pos_map = {1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD'}
-        
+
         results = {}
-        
+
         for pid in player_ids:
             history = self.fetcher.get_player_history(pid)
             player_stats = self.fetcher.get_player_stats(pid)
             value = float(player_stats.get('now_cost', 0)) / 10.0
             position = pos_map.get(player_stats.get('element_type', 3), 'MID')
-            selected_pct = float(player_stats.get('selected_by_percent', 0) or 0)
-            
+
             gw_predictions = []
-            
+
             for gw_offset in range(1, num_gws + 1):
                 target_gw = current_gw + gw_offset
-                
+
                 if history.empty:
                     gw_predictions.append(0.0)
                     continue
-                
+
                 rolling_stats = self._get_rolling_stats(history, current_gw + 1, position=position)
                 if not rolling_stats:
                     gw_predictions.append(0.0)
                     continue
-                
-                fdr, is_home, team_id, opp_id = self._get_fixture_difficulty(pid, target_gw)
-                
-                team_str = self._team_strength.get(team_id, {'attack': 1.5, 'defense': 1.5})
-                opp_str = self._team_strength.get(opp_id, {'attack': 1.5, 'defense': 1.5})
-                
-                row = rolling_stats.copy()
-                row['value'] = value
-                row['selected_pct'] = selected_pct
-                row['fixture_difficulty'] = fdr
-                row['is_home'] = is_home
-                row['is_gkp'] = 1 if position == 'GKP' else 0
-                row['is_def'] = 1 if position == 'DEF' else 0
-                row['is_mid'] = 1 if position == 'MID' else 0
-                row['is_fwd'] = 1 if position == 'FWD' else 0
-                row['team_attack_strength'] = team_str['attack']
-                row['team_defense_strength'] = team_str['defense']
-                row['opp_attack_strength'] = opp_str['attack']
-                row['opp_defense_strength'] = opp_str['defense']
-                
-                X_pred = pd.DataFrame([row])
-                for col in self.feature_cols:
-                    if col not in X_pred.columns:
-                        X_pred[col] = 0.0
-                X_pred = X_pred[self.feature_cols].fillna(0)
-                
-                X_scaled = self.scaler.transform(X_pred)
-                
-                # Ensemble prediction
-                if self.use_ensemble:
-                    pred_gb = self.gb_model.predict(X_scaled)[0]
-                    pred_rf = self.rf_model.predict(X_scaled)[0]
-                    pred = (pred_gb + pred_rf) / 2
-                else:
-                    pred = self.gb_model.predict(X_scaled)[0]
-                    
-                gw_predictions.append(round(max(0, pred), 2))
-            
+
+                # Get all fixtures for this GW (handles BGW/DGW)
+                gw_fixtures = self._get_gw_fixtures(pid, target_gw)
+
+                if not gw_fixtures:
+                    # BGW: no fixture, no points
+                    gw_predictions.append(0.0)
+                    continue
+
+                # Sum predictions across all fixtures (1 for normal, 2 for DGW)
+                gw_total = 0.0
+                for fdr, is_home, team_id, opp_id in gw_fixtures:
+                    pred = self._predict_single_fixture(
+                        rolling_stats, value, position,
+                        fdr, is_home, team_id, opp_id
+                    )
+                    gw_total += max(0, pred)
+
+                gw_predictions.append(round(gw_total, 2))
+
             # Calculate confidence based on player's consistency
             if len(history) >= 4:
                 recent_pts = history.tail(4)['total_points'].std()
@@ -596,7 +619,7 @@ class FPLPointsPredictor:
                     confidence = 'low'
             else:
                 confidence = 'low'
-            
+
             results[pid] = {
                 'predictions': gw_predictions,
                 'cumulative': round(sum(gw_predictions), 2),
@@ -604,7 +627,7 @@ class FPLPointsPredictor:
                 'std_dev': round(np.std(gw_predictions) if gw_predictions else 0, 2),
                 'avg_per_gw': round(sum(gw_predictions) / max(len(gw_predictions), 1), 2)
             }
-        
+
         return results
 
     def get_model_metrics(self) -> Dict:

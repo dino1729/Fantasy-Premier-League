@@ -24,3 +24,4 @@ matplotlib>=3.5.0
 seaborn>=0.12.0
 squarify>=0.4.3
 pyyaml>=6.0
+openai>=1.40.0

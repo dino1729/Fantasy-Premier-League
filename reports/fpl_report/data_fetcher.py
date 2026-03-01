@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import requests
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from scraping.fpl_api import (
     get_data,
     get_individual_player_data,
@@ -393,6 +394,53 @@ class FPLDataFetcher:
             
         return mapped_fixtures
 
+    def get_fixtures_by_gw(self, team_id: int, start_gw: int, end_gw: int) -> Dict[int, List[Dict]]:
+        """Get fixtures for a team keyed by gameweek number.
+
+        Unlike get_upcoming_fixtures (flat list limited by count), this returns
+        a dict keyed by GW so callers can detect BGW (empty list) and DGW
+        (two-element list) per gameweek.
+
+        Args:
+            team_id: FPL team ID (1-20).
+            start_gw: First gameweek (inclusive).
+            end_gw: Last gameweek (inclusive).
+
+        Returns:
+            Dict mapping each GW in [start_gw, end_gw] to a list of fixture
+            dicts.  Empty list = BGW, two-element list = DGW.
+        """
+        by_gw: Dict[int, List[Dict]] = {gw: [] for gw in range(start_gw, end_gw + 1)}
+
+        if self._difficulty_calculator is None:
+            return by_gw
+
+        # Pass start_gw-1 so the calculator includes fixtures from start_gw
+        # (it excludes gw <= current_gw_override)
+        all_difficulties = self._difficulty_calculator.get_fixture_difficulties(
+            current_gw_override=start_gw - 1
+        )
+        team_fixtures = all_difficulties.get(team_id, [])
+
+        for fix in team_fixtures:
+            gw = fix['gameweek']
+            if gw not in by_gw:
+                continue
+            by_gw[gw].append({
+                'gameweek': gw,
+                'opponent': fix['opponent'],
+                'is_home': fix['is_home'],
+                'difficulty': fix['fdr_elo'],
+                'difficulty_ordinal': fix['fdr_original'],
+                'win_prob': fix['win_prob'],
+                'draw_prob': fix['draw_prob'],
+                'loss_prob': fix['loss_prob'],
+                'opponent_elo': fix.get('opponent_elo', 0),
+                'own_elo': fix.get('own_elo', 0),
+            })
+
+        return by_gw
+
     def get_position_peers(self, position: str, min_minutes: int = 90) -> pd.DataFrame:
         """Get all players of a certain position for comparison.
 
@@ -764,9 +812,7 @@ def build_competitive_dataset(
     if cached_dataset is not None:
         return cached_dataset
     
-    results = []
-
-    for entry_id in entry_ids:
+    def _build_single_entry(entry_id: int) -> Dict[str, Any]:
         fetcher = FPLDataFetcher(entry_id, season, use_cache=use_cache, session_cache=session_cache)
 
         # Determine gameweek
@@ -777,7 +823,7 @@ def build_competitive_dataset(
 
         # Get GW history
         gw_history = fetcher.get_gw_history()
-        
+
         # Filter history if gameweek specified to prevent leakage
         if gw:
             gw_history = [h for h in gw_history if h['event'] <= gw]
@@ -830,7 +876,14 @@ def build_competitive_dataset(
 
         # Get transfer history for past 5 GWs (for visual progression)
         try:
-            transfer_history = compute_transfer_history(entry_id, gw, num_gws=5, season=season, use_cache=use_cache, session_cache=session_cache)
+            transfer_history = compute_transfer_history(
+                entry_id,
+                gw,
+                num_gws=5,
+                season=season,
+                use_cache=use_cache,
+                session_cache=session_cache
+            )
         except Exception:
             transfer_history = {
                 'current_xi': [],
@@ -841,7 +894,7 @@ def build_competitive_dataset(
                 'gw_range': []
             }
 
-        results.append({
+        return {
             'entry_id': entry_id,
             'team_info': team_info,
             'gw_history': gw_history,
@@ -853,7 +906,24 @@ def build_competitive_dataset(
             'bank': bank,
             'gw_transfers': gw_transfers,
             'transfer_history': transfer_history
-        })
+        }
+
+    max_workers = max(1, min(5, len(entry_ids)))
+    ordered_results: List[Optional[Dict[str, Any]]] = [None] * len(entry_ids)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_index = {
+            executor.submit(_build_single_entry, entry_id): idx
+            for idx, entry_id in enumerate(entry_ids)
+        }
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            entry_id = entry_ids[idx]
+            try:
+                ordered_results[idx] = future.result()
+            except Exception as exc:
+                print(f"[WARN] Competitive dataset failed for entry {entry_id}: {exc}")
+
+    results = [item for item in ordered_results if item is not None]
 
     # Cache the complete dataset
     cache.set('competitive', results, season, gameweek, *cache_key_args)
@@ -1080,7 +1150,7 @@ def get_bgw_dgw_gameweeks(use_cache: bool = True, session_cache: Optional['Sessi
                     'teams_missing': len(teams_missing),
                     'team_ids': list(teams_missing)
                 })
-            elif teams_doubled:
+            if teams_doubled:
                 dgws.append({
                     'gw': gw,
                     'teams_doubled': len(teams_doubled),
@@ -1129,31 +1199,41 @@ def compute_league_ownership(
     captain_counts = {}  # player_id -> count of captaincies
     valid_entries = 0
 
-    for entry_id in entry_ids:
+    def _fetch_entry_picks(entry_id: int) -> List[Dict]:
         try:
             picks_data = get_entry_picks_for_gw(entry_id, gw)
             picks = picks_data.get('picks', [])
-            
+            return picks if picks else []
+        except Exception:
+            # Entry might not have played this GW yet
+            return []
+
+    max_workers = max(1, min(10, len(entry_ids)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_entry = {
+            executor.submit(_fetch_entry_picks, entry_id): entry_id
+            for entry_id in entry_ids
+        }
+        for future in as_completed(future_to_entry):
+            try:
+                picks = future.result()
+            except Exception:
+                continue
             if not picks:
                 continue
-            
+
             valid_entries += 1
-            
             for pick in picks:
                 player_id = pick.get('element')
                 if player_id is None:
                     continue
-                
+
                 # Count ownership (only count starting XI + bench = 15 players)
                 player_counts[player_id] = player_counts.get(player_id, 0) + 1
-                
+
                 # Count captaincies
                 if pick.get('is_captain', False):
                     captain_counts[player_id] = captain_counts.get(player_id, 0) + 1
-                    
-        except Exception as e:
-            # Entry might not have played this GW yet
-            continue
 
     if valid_entries == 0:
         result = {

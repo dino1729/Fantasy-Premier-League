@@ -160,7 +160,7 @@ class TransferStrategyPlanner:
         squad_predictions = self._predict_multiple_gws(squad_ids, num_weeks)
         
         # Analyze fixtures for each player
-        fixture_analysis = self._analyze_squad_fixtures(squad_analysis, num_weeks)
+        fixture_analysis = self._analyze_squad_fixtures(squad_analysis, num_weeks, current_gw)
         
         # Calculate expected value for current squad
         current_squad_ev = self._calculate_squad_ev(squad_predictions)
@@ -509,48 +509,111 @@ class TransferStrategyPlanner:
             'solver_time': main_result.solver_time,
         }
 
-    def _analyze_squad_fixtures(self, squad_analysis: List[Dict], 
-                                 num_weeks: int) -> Dict[int, Dict]:
+    def _analyze_squad_fixtures(self, squad_analysis: List[Dict],
+                                 num_weeks: int,
+                                 current_gw: int = None) -> Dict[int, Dict]:
         """Analyze fixture difficulty for each squad player.
-        
-        Returns dict mapping player_id to fixture analysis.
+
+        Args:
+            squad_analysis: List of player dicts from squad analysis.
+            num_weeks: Number of future gameweeks to analyze.
+            current_gw: Current gameweek number. Used to build GW-keyed
+                fixture data for heatmap alignment.
+
+        Returns:
+            Dict mapping player_id to fixture analysis including
+            ``fixtures_by_gw`` (keyed by GW number) alongside the flat
+            ``fixtures`` list for backward compat.
         """
         fixture_analysis = {}
-        
+
+        # Pre-fetch all fixture difficulties once (avoids 15x Elo recalc)
+        # Pass current_gw so the calculator excludes only GWs the report
+        # considers past, not the API's live current GW.
+        all_difficulties = {}
+        if hasattr(self.fetcher, '_difficulty_calculator') and self.fetcher._difficulty_calculator:
+            all_difficulties = self.fetcher._difficulty_calculator.get_fixture_difficulties(
+                current_gw_override=current_gw
+            )
+
+        start_gw = (current_gw or 0) + 1
+        end_gw = start_gw + num_weeks - 1
+
         for player in squad_analysis:
             pid = player.get('player_id')
             if not pid:
                 continue
-            
-            # Get player info
+
             player_name = player.get('name', 'Unknown')
             position = player.get('position', 'UNK')
-            
+
             # Get team_id - try multiple locations
             team_id = player.get('stats', {}).get('team', 0)
             if not team_id:
                 team_id = player.get('raw_stats', {}).get('team', 0)
-            
-            fixtures = self.fetcher.get_upcoming_fixtures(team_id, num_weeks)
-            
-            if not fixtures:
+
+            # Build GW-keyed fixture data from pre-fetched difficulties
+            team_fixes = all_difficulties.get(team_id, [])
+            fixtures_by_gw: Dict[int, List[Dict]] = {
+                gw: [] for gw in range(start_gw, end_gw + 1)
+            } if current_gw else {}
+
+            flat_fixtures = []
+            for fix in sorted(team_fixes, key=lambda x: x['gameweek']):
+                gw = fix['gameweek']
+                if gw < start_gw or gw > end_gw:
+                    continue
+                mapped = {
+                    'gameweek': gw,
+                    'opponent': fix['opponent'],
+                    'is_home': fix['is_home'],
+                    'difficulty': fix['fdr_elo'],
+                    'difficulty_ordinal': fix['fdr_original'],
+                    'win_prob': fix['win_prob'],
+                    'draw_prob': fix['draw_prob'],
+                    'loss_prob': fix['loss_prob'],
+                    'opponent_elo': fix.get('opponent_elo', 0),
+                    'own_elo': fix.get('own_elo', 0),
+                }
+                flat_fixtures.append(mapped)
+                if current_gw and gw in fixtures_by_gw:
+                    fixtures_by_gw[gw].append(mapped)
+
+            if not flat_fixtures:
                 fixture_analysis[pid] = {
                     'player_name': player_name,
                     'position': position,
                     'fixtures': [],
+                    'fixtures_by_gw': fixtures_by_gw,
                     'avg_difficulty': 3.0,
                     'swing': 'neutral',
                     'swing_gw': None,
                     'difficulty_trend': [3.0] * num_weeks
                 }
                 continue
-            
-            difficulties = [f.get('difficulty', 3) for f in fixtures]
-            
+
+            # Per-GW difficulties for swing calc (use average for DGW, skip BGW)
+            difficulties = []
+            for gw in range(start_gw, end_gw + 1):
+                gw_fixes = fixtures_by_gw.get(gw, []) if current_gw else []
+                if not gw_fixes:
+                    # For swing calc, use flat list order as fallback
+                    continue
+                elif len(gw_fixes) == 1:
+                    difficulties.append(gw_fixes[0].get('difficulty', 3))
+                else:
+                    difficulties.append(
+                        sum(f.get('difficulty', 3) for f in gw_fixes) / len(gw_fixes)
+                    )
+
+            # Fallback to flat list if GW-keyed calc produced nothing
+            if not difficulties:
+                difficulties = [f.get('difficulty', 3) for f in flat_fixtures]
+
             # Calculate fixture swing - compare first 2 vs next 3
             early_avg = np.mean(difficulties[:2]) if len(difficulties) >= 2 else 3.0
             late_avg = np.mean(difficulties[2:]) if len(difficulties) > 2 else 3.0
-            
+
             swing_diff = late_avg - early_avg
             if swing_diff < -0.5:
                 swing = 'improving'
@@ -561,11 +624,12 @@ class TransferStrategyPlanner:
             else:
                 swing = 'neutral'
                 swing_gw = None
-            
+
             fixture_analysis[pid] = {
                 'player_name': player_name,
                 'position': position,
-                'fixtures': fixtures,
+                'fixtures': flat_fixtures,
+                'fixtures_by_gw': fixtures_by_gw,
                 'avg_difficulty': round(np.mean(difficulties), 2),
                 'swing': swing,
                 'swing_gw': swing_gw,
@@ -573,7 +637,7 @@ class TransferStrategyPlanner:
                 'early_avg': round(early_avg, 2),
                 'late_avg': round(late_avg, 2)
             }
-        
+
         return fixture_analysis
 
     def _find_swing_point(self, difficulties: List[float], 
@@ -1068,13 +1132,11 @@ class TransferStrategyPlanner:
         """
         from simulation.state import CHIP_RESET_GW, CHIPS_PER_HALF
         from .data_fetcher import get_bgw_dgw_gameweeks
+        from .dgw_bgw_fetcher import fetch_dgw_bgw_intelligence, merge_bgw_dgw_data
 
         current_gw = len(gw_history) if gw_history else 1
         first_half = current_gw < CHIP_RESET_GW
         half_label = 'first' if first_half else 'second'
-
-        # Build chip usage map
-        used_chips = {c.get('name', ''): c.get('event', 0) for c in chips_used}
 
         # Filter chips used in current half
         if first_half:
@@ -1084,14 +1146,20 @@ class TransferStrategyPlanner:
 
         chips_remaining = CHIPS_PER_HALF - len(chips_used_this_half)
 
+        # Build chip usage map from current-half chips only (avoids cross-half confusion)
+        used_chips = {c.get('name', ''): c.get('event', 0) for c in chips_used_this_half}
+
         # Get squad issues
         squad_issues = self.fetcher.get_squad_issues()
 
         # Get BGW/DGW data
         try:
             bgw_dgw_data = get_bgw_dgw_gameweeks(use_cache=True, session_cache=self.fetcher.cache)
-            bgws = [b for b in bgw_dgw_data.get('bgw', []) if b.get('gw', 0) > current_gw]
-            dgws = [d for d in bgw_dgw_data.get('dgw', []) if d.get('gw', 0) > current_gw]
+            predicted_data = fetch_dgw_bgw_intelligence(current_gw=current_gw, session_cache=self.fetcher.cache)
+            merged_data = merge_bgw_dgw_data(bgw_dgw_data, predicted_data)
+            
+            bgws = [b for b in merged_data.get('bgw', []) if b.get('gw', 0) > current_gw]
+            dgws = [d for d in merged_data.get('dgw', []) if d.get('gw', 0) > current_gw]
         except Exception:
             bgws, dgws = [], []
 
@@ -2406,9 +2474,21 @@ class FreeHitOptimizer:
         # Bonus formula: diff_bonus = base_bonus * (1 - league_ownership)
         # Higher base_bonus = more aggressive differential seeking
         self.strategy_params = {
-            'safe': {'diff_bonus': 0.5, 'max_differentials': 2},
-            'balanced': {'diff_bonus': 1.5, 'max_differentials': 4},
-            'aggressive': {'diff_bonus': 3.0, 'max_differentials': 6}
+            'safe': {
+                'diff_bonus': 0.3, 'max_differentials': 1,
+                'ownership_floor': 10.0,  # Only consider players owned by 10%+
+                'captain_from_template': True,  # Captain must be high-ownership
+            },
+            'balanced': {
+                'diff_bonus': 1.5, 'max_differentials': 4,
+                'ownership_floor': 2.0,
+                'captain_from_template': False,
+            },
+            'aggressive': {
+                'diff_bonus': 4.0, 'max_differentials': 8,
+                'ownership_floor': 0.5,  # Include very low-ownership punts
+                'captain_from_template': False,
+            },
         }
     
     def _build_fixture_map(self, fixtures_data: List[Dict]):
@@ -2558,27 +2638,39 @@ class FreeHitOptimizer:
         return round(score, 3)
     
     def _get_available_players(self, position: str) -> list:
-        """Get available players for a position, sorted by score descending."""
+        """Get available players for a position, sorted by score descending.
+
+        Applies strategy-specific ownership_floor to differentiate safe/balanced/aggressive.
+        """
         pos_df = self.players_df[self.players_df['position'] == position].copy()
-        
+
         # Filter available players
         available_mask = pos_df.apply(self._is_available, axis=1)
         pos_df = pos_df[available_mask]
-        
+
         # Filter players with some minutes (at least 45)
         pos_df = pos_df[pos_df['minutes'] >= 45]
-        
+
+        # Apply strategy-specific ownership floor (safe = template-only, aggressive = punts OK)
+        params = self.strategy_params.get(self.strategy, self.strategy_params['balanced'])
+        ownership_floor = params.get('ownership_floor', 0.0)
+        if ownership_floor > 0 and 'selected_by_percent' in pos_df.columns:
+            # For safe strategy: only well-owned players. For aggressive: include punts.
+            pos_df = pos_df[
+                pos_df['selected_by_percent'].astype(float).fillna(0) >= ownership_floor
+            ]
+
         # Calculate scores
         pos_df['score'] = pos_df.apply(self._calculate_score, axis=1)
-        
+
         # Sort by score descending
         pos_df = pos_df.sort_values('score', ascending=False)
-        
+
         return pos_df.to_dict('records')
-    
+
     def _get_bench_candidates(self, position: str, exclude_ids: set) -> list:
         """Get bench candidates sorted by score (desc) then price (desc) for tie-break.
-        
+
         This ensures we pick high-quality bench options that also maximize spend.
         """
         pos_df = self.players_df[self.players_df['position'] == position].copy()

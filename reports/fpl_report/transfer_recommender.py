@@ -183,49 +183,59 @@ class TransferRecommender:
 
         return True
 
-    def identify_underperformers(self, squad_analysis: List[Dict]) -> List[Dict]:
+    def identify_underperformers(self, squad_analysis: List[Dict],
+                                quadrant_data: Dict = None) -> List[Dict]:
         """Identify underperforming players in the squad.
 
-        Criteria:
-        - Form < 3.0
-        - Underperforming xG/xA by > 30%
-        - Minutes < 60 per game average
-        - Bottom 25% peer ranking
-        - Falling form trend
+        Uses continuous metrics from PlayerAnalyzer (slope magnitude, per-metric
+        percentiles, assist underperformance) plus suspension risk and quadrant
+        classification for a nuanced severity score.
 
         Args:
             squad_analysis: List of player analysis dictionaries.
+            quadrant_data: Optional dict mapping player_id -> quadrant label
+                (CLINICAL, VOLUME, ELITE, AVOID) from usage/output analysis.
 
         Returns:
-            List of underperformer dictionaries with reasons.
+            List of underperformer dictionaries with reasons, sorted by severity.
         """
         underperformers = []
+        quadrant_data = quadrant_data or {}
 
         for player in squad_analysis:
             reasons = []
             severity = 0  # Higher = more urgent
 
-            # Check form
+            # -- Form analysis (enhanced: use slope magnitude) --
             form_data = player.get('form_analysis', {})
             form_avg = form_data.get('average', 0)
             if form_avg < 3.0:
                 reasons.append(f"Low form ({form_avg:.1f})")
                 severity += 3
 
+            trend_slope = form_data.get('trend_slope', 0)
             if form_data.get('trend') == 'falling':
-                reasons.append("Declining form trend")
-                severity += 2
+                # Scale severity by slope magnitude (steeper decline = worse)
+                slope_severity = min(abs(trend_slope) * 2, 5)
+                reasons.append(f"Declining form (slope {trend_slope:+.1f})")
+                severity += max(2, round(slope_severity))
 
-            # Check expected vs actual
+            # -- Expected vs actual (enhanced: check assists too) --
             exp_data = player.get('expected_vs_actual', {})
             if exp_data.get('goals_performance') == 'under':
                 xg = exp_data.get('expected_goals', 0)
                 goals = exp_data.get('actual_goals', 0)
-                if xg > 1:  # Only flag if significant xG
+                if xg > 1:
                     reasons.append(f"Underperforming xG ({goals} vs {xg:.1f} expected)")
                     severity += 1
+            if exp_data.get('assists_performance') == 'under':
+                xa = exp_data.get('expected_assists', 0)
+                assists = exp_data.get('actual_assists', 0)
+                if xa > 1:
+                    reasons.append(f"Underperforming xA ({assists} vs {xa:.1f} expected)")
+                    severity += 1
 
-            # Check minutes
+            # -- Minutes check --
             minutes = player.get('raw_stats', {}).get('minutes', 0)
             gws_played = len(form_data.get('recent_points', []))
             if gws_played > 0:
@@ -234,21 +244,50 @@ class TransferRecommender:
                     reasons.append(f"Limited minutes ({mins_per_gw:.0f}/GW)")
                     severity += 2
 
-            # Check peer comparison
+            # -- Peer comparison (enhanced: use per-metric percentiles) --
             peer_data = player.get('peer_comparison', {})
-            if peer_data.get('overall_rating', 100) < 25:
+            overall_rating = peer_data.get('overall_rating', 100)
+            if overall_rating < 25:
                 reasons.append("Bottom quartile vs peers")
                 severity += 2
+            # Check individual metric weakness
+            percentiles = peer_data.get('percentiles', {})
+            for metric in ('total_points', 'form', 'ict_index'):
+                pctl = percentiles.get(metric, 50)
+                if pctl < 15:
+                    reasons.append(f"Bottom 15% in {metric.replace('_', ' ')}")
+                    severity += 1
+                    break  # One flag is enough
 
-            # Check for injury/unavailability
+            # -- Suspension risk (yellow card proximity) --
             stats = player.get('raw_stats', {})
+            yellow_cards = stats.get('yellow_cards', 0)
+            if yellow_cards >= 4:
+                reasons.append(f"Suspension risk ({yellow_cards} yellows, banned at 5)")
+                severity += 3
+            elif yellow_cards >= 3:
+                reasons.append(f"Yellow card warning ({yellow_cards}/5)")
+                severity += 1
+
+            # -- Injury/unavailability --
             if minutes == 0:
                 reasons.append("No minutes this season")
                 severity += 4
+            chance = stats.get('chance_of_playing_next_round')
+            if chance is not None and chance <= 25:
+                reasons.append(f"Injury doubt ({chance}% chance)")
+                severity += 3
+
+            # -- Quadrant classification (regression risk) --
+            pid = player.get('player_id')
+            quadrant = quadrant_data.get(pid, '')
+            if quadrant == 'CLINICAL':
+                reasons.append("CLINICAL quadrant (regression risk)")
+                severity += 2
 
             if reasons:
                 underperformers.append({
-                    'player_id': player.get('player_id'),
+                    'player_id': pid,
                     'name': player.get('name'),
                     'position': player.get('position'),
                     'team': player.get('team'),
@@ -256,7 +295,8 @@ class TransferRecommender:
                     'reasons': reasons,
                     'severity': severity,
                     'current_form': form_avg,
-                    'total_points': stats.get('total_points', 0)
+                    'total_points': stats.get('total_points', 0),
+                    'quadrant': quadrant,
                 })
 
         # Sort by severity (most urgent first)
@@ -264,7 +304,9 @@ class TransferRecommender:
 
     def score_replacement(self, candidate: Dict, budget: float,
                           fixtures: List[Dict], current_player: Dict,
-                          predicted_points: float = 0.0) -> float:
+                          predicted_points: float = 0.0,
+                          quadrant_data: Dict = None,
+                          differential_targets: set = None) -> float:
         """Score a potential replacement player.
 
         Args:
@@ -273,20 +315,41 @@ class TransferRecommender:
             fixtures: Upcoming fixtures for the candidate's team.
             current_player: Current player being replaced.
             predicted_points: RF Model prediction for next GW.
+            quadrant_data: Optional dict mapping player_id -> quadrant label.
+            differential_targets: Optional set of player IDs owned by top
+                managers but not by user (template convergence signal).
 
         Returns:
             Weighted score (0-100).
         """
+        quadrant_data = quadrant_data or {}
+        differential_targets = differential_targets or set()
         scores = {}
 
         # Form score (0-100)
         form = float(candidate.get('form', 0) or 0)
         scores['form'] = min(form * 10, 100)
 
-        # Fixture difficulty score (0-100)
+        # Fixture score (0-100) using Elo win probabilities when available
         if fixtures:
-            avg_difficulty = np.mean([f.get('difficulty', 3) for f in fixtures[:3]])
-            scores['fixtures'] = (5 - avg_difficulty) / 4 * 100  # Invert: easier = higher
+            position_type = candidate.get('element_type', 3)
+            is_defensive = position_type in (1, 2)  # GKP or DEF
+            fix_scores = []
+            for f in fixtures[:3]:
+                win_prob = f.get('win_prob')
+                draw_prob = f.get('draw_prob')
+                if win_prob is not None and draw_prob is not None:
+                    if is_defensive:
+                        # Defenders/GKPs benefit from wins AND draws (clean sheets)
+                        fix_scores.append(win_prob * 0.4 + draw_prob * 0.6)
+                    else:
+                        # Attackers/mids benefit primarily from wins (goals/assists)
+                        fix_scores.append(win_prob)
+                else:
+                    # Fallback to FDR inversion when Elo data unavailable
+                    diff = f.get('difficulty', 3)
+                    fix_scores.append((5 - diff) / 4)
+            scores['fixtures'] = np.mean(fix_scores) * 100 if fix_scores else 50
         else:
             scores['fixtures'] = 50
 
@@ -335,15 +398,29 @@ class TransferRecommender:
         # Calculate weighted total
         total = sum(scores.get(k, 50) * self.WEIGHTS[k] for k in self.WEIGHTS)
 
+        # Quadrant bonus: VOLUME candidates are buy signals (high usage, due returns)
+        cid = candidate.get('id', 0)
+        quadrant = quadrant_data.get(cid, '')
+        if quadrant == 'VOLUME':
+            total += 5  # Modest boost for statistically due players
+
+        # Template convergence: boost players owned by top managers but not by user
+        if cid in differential_targets:
+            total += 8  # Significant boost for matching top-manager template
+
         return round(total, 1)
 
     def get_recommendations(self, underperformers: List[Dict],
-                            num_recommendations: int = 3) -> List[Dict]:
+                            num_recommendations: int = 3,
+                            quadrant_data: Dict = None,
+                            differential_targets: set = None) -> List[Dict]:
         """Get transfer recommendations for underperforming players.
 
         Args:
             underperformers: List of underperforming player dicts.
             num_recommendations: Max replacements to suggest per player.
+            quadrant_data: Optional quadrant labels for buy-signal scoring.
+            differential_targets: Optional set of player IDs for template convergence.
 
         Returns:
             List of recommendation dictionaries.
@@ -416,7 +493,9 @@ class TransferRecommender:
                 pred_points = predictions.get(pid, 0.0)
 
                 score = self.score_replacement(
-                    cand_dict, total_budget, fixtures, player, pred_points
+                    cand_dict, total_budget, fixtures, player, pred_points,
+                    quadrant_data=quadrant_data,
+                    differential_targets=differential_targets
                 )
 
                 # Calculate peer percentile

@@ -34,6 +34,11 @@
 #   -k, --keep      Keep auxiliary files (.aux, .log, .out) after compilation
 #   -n, --no-open   Don't prompt to open PDF after generation (macOS only)
 #   -t, --train     Force retrain prediction models (auto-trains if models missing or new data)
+#   --intelligence  Enable intelligence layer narrative sections
+#   --no-intelligence  Disable intelligence layer narrative sections
+#   --intelligence-model MODEL
+#   --intelligence-fallback-models LIST
+#   --intelligence-sections LIST
 #
 # EXAMPLES:
 #   ./run_report.sh                     # Generate report for default team, current GW
@@ -42,6 +47,9 @@
 #   ./run_report.sh -q 847569           # Quiet mode - less output
 #   ./run_report.sh -t                  # Retrain models first, then generate report
 #   ./run_report.sh --train 847569 17   # Retrain for GW17, then generate report
+#   ./run_report.sh --intelligence       # Enable intelligence layer
+#   ./run_report.sh --intelligence-model gpt-5.2
+#   ./run_report.sh --intelligence-sections transfer_strategy,chip_usage_strategy
 #   ./run_report.sh --help              # Show this help message
 #
 # OUTPUT FILES:
@@ -81,6 +89,23 @@ PROJECT_ROOT="$SCRIPT_DIR"
 CONFIG_FILE="$PROJECT_ROOT/config.yml"
 PYTHON_SCRIPT="$PROJECT_ROOT/generate_fpl_report.py"
 REPORTS_DIR="$PROJECT_ROOT/reports"
+
+# Headless-safe plotting/cache defaults for CLI environments.
+# Respect user-provided values when already set.
+CACHE_ROOT="$PROJECT_ROOT/.cache"
+if [[ -z "${MPLBACKEND:-}" ]]; then
+    export MPLBACKEND="Agg"
+fi
+if [[ -z "${LOKY_MAX_CPU_COUNT:-}" ]]; then
+    export LOKY_MAX_CPU_COUNT="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
+fi
+if [[ -z "${MPLCONFIGDIR:-}" ]]; then
+    export MPLCONFIGDIR="$CACHE_ROOT/matplotlib"
+fi
+if [[ -z "${XDG_CACHE_HOME:-}" ]]; then
+    export XDG_CACHE_HOME="$CACHE_ROOT/xdg"
+fi
+mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME/fontconfig"
 
 # Read settings from config.yml (project root)
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -161,6 +186,16 @@ OPTIONS:
   -n, --no-open   Don't prompt to open PDF after generation (macOS only)
   -t, --train     Force retrain prediction models (clears existing models)
                   Note: Auto-trains if models missing OR new GW data downloaded
+  --intelligence  Enable intelligence layer narrative sections
+  --no-intelligence
+                  Disable intelligence layer narrative sections
+  --intelligence-model MODEL
+                  Primary gateway model id (for example: gpt-5.2)
+  --intelligence-fallback-models LIST
+                  Comma-separated fallback model ids
+  --intelligence-sections LIST
+                  Comma-separated section keys:
+                  transfer_strategy,wildcard_draft,free_hit_draft,chip_usage_strategy,season_insights
 
 EXAMPLES:
   ./run_report.sh                     # Generate for default team, current GW
@@ -169,6 +204,9 @@ EXAMPLES:
   ./run_report.sh -q 847569           # Quiet mode - less output
   ./run_report.sh -t                  # Retrain models first, then generate
   ./run_report.sh --train 847569 17   # Retrain for GW17, then generate
+  ./run_report.sh --intelligence      # Enable intelligence layer
+  ./run_report.sh --intelligence-model gpt-5.2
+  ./run_report.sh --intelligence-fallback-models gemini-3.1-pro-preview
   ./run_report.sh --help              # Show this help message
 
 OUTPUT FILES:
@@ -205,6 +243,10 @@ QUIET_MODE=0
 KEEP_AUX=0
 NO_OPEN=0
 RETRAIN=0
+INTELLIGENCE_TOGGLE=""
+INTELLIGENCE_MODEL=""
+INTELLIGENCE_FALLBACK_MODELS=""
+INTELLIGENCE_SECTIONS=""
 POSITIONAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -227,6 +269,38 @@ while [[ $# -gt 0 ]]; do
         -t|--train)
             RETRAIN=1
             shift
+            ;;
+        --intelligence)
+            INTELLIGENCE_TOGGLE="--intelligence"
+            shift
+            ;;
+        --no-intelligence)
+            INTELLIGENCE_TOGGLE="--no-intelligence"
+            shift
+            ;;
+        --intelligence-model)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                echo "${RED}[ERROR]${NC} --intelligence-model requires a value"
+                exit 1
+            fi
+            INTELLIGENCE_MODEL="$2"
+            shift 2
+            ;;
+        --intelligence-fallback-models)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                echo "${RED}[ERROR]${NC} --intelligence-fallback-models requires a value"
+                exit 1
+            fi
+            INTELLIGENCE_FALLBACK_MODELS="$2"
+            shift 2
+            ;;
+        --intelligence-sections)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                echo "${RED}[ERROR]${NC} --intelligence-sections requires a value"
+                exit 1
+            fi
+            INTELLIGENCE_SECTIONS="$2"
+            shift 2
             ;;
         -*)
             echo "${RED}[ERROR]${NC} Unknown option: $1"
@@ -450,6 +524,18 @@ echo "${YELLOW}[1/4]${NC} Fetching data and generating LaTeX..."
 PYTHON_ARGS=("--team" "$TEAM_ID" "--no-pdf")
 if [[ -n "$GAMEWEEK" ]]; then
     PYTHON_ARGS+=("--gw" "$GAMEWEEK")
+fi
+if [[ -n "$INTELLIGENCE_TOGGLE" ]]; then
+    PYTHON_ARGS+=("$INTELLIGENCE_TOGGLE")
+fi
+if [[ -n "$INTELLIGENCE_MODEL" ]]; then
+    PYTHON_ARGS+=("--intelligence-model" "$INTELLIGENCE_MODEL")
+fi
+if [[ -n "$INTELLIGENCE_FALLBACK_MODELS" ]]; then
+    PYTHON_ARGS+=("--intelligence-fallback-models" "$INTELLIGENCE_FALLBACK_MODELS")
+fi
+if [[ -n "$INTELLIGENCE_SECTIONS" ]]; then
+    PYTHON_ARGS+=("--intelligence-sections" "$INTELLIGENCE_SECTIONS")
 fi
 
 PYTHON_EXIT=0

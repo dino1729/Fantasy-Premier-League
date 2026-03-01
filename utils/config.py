@@ -221,6 +221,54 @@ VERBOSE: bool = OUTPUT['verbose']
 
 
 # =============================================================================
+# INTELLIGENCE LAYER (OPTIONAL LLM NARRATIVES)
+# =============================================================================
+
+_INTELLIGENCE_CONFIG = _CONFIG.get('intelligence', {})
+_INTELLIGENCE_SECTIONS = _INTELLIGENCE_CONFIG.get('sections', {})
+_INTELLIGENCE_MAX_TOKENS = _INTELLIGENCE_CONFIG.get('max_tokens', {})
+
+INTELLIGENCE: Dict[str, Any] = {
+    'enabled': _INTELLIGENCE_CONFIG.get('enabled', False),
+    'model': _INTELLIGENCE_CONFIG.get('model', 'gpt-5.2'),
+    'fallback_models': _INTELLIGENCE_CONFIG.get('fallback_models', ['gemini-3.1-pro-preview']),
+    'retries': _INTELLIGENCE_CONFIG.get('retries', 2),
+    'timeout_seconds': _INTELLIGENCE_CONFIG.get('timeout_seconds', 120),
+    'cache_ttl_seconds': _INTELLIGENCE_CONFIG.get('cache_ttl_seconds', 86400),
+    'sections': {
+        'transfer_strategy': _INTELLIGENCE_SECTIONS.get('transfer_strategy', True),
+        'wildcard_draft': _INTELLIGENCE_SECTIONS.get('wildcard_draft', True),
+        'free_hit_draft': _INTELLIGENCE_SECTIONS.get('free_hit_draft', True),
+        'chip_usage_strategy': _INTELLIGENCE_SECTIONS.get('chip_usage_strategy', True),
+        'season_insights': _INTELLIGENCE_SECTIONS.get('season_insights', True),
+    },
+    'max_tokens': {
+        'transfer_strategy': _INTELLIGENCE_MAX_TOKENS.get('transfer_strategy', 1000),
+        'wildcard_draft': _INTELLIGENCE_MAX_TOKENS.get('wildcard_draft', 900),
+        'free_hit_draft': _INTELLIGENCE_MAX_TOKENS.get('free_hit_draft', 900),
+        'chip_usage_strategy': _INTELLIGENCE_MAX_TOKENS.get('chip_usage_strategy', 1200),
+        'season_insights': _INTELLIGENCE_MAX_TOKENS.get('season_insights', 800),
+    },
+    'dgw_bgw_search': _INTELLIGENCE_CONFIG.get('dgw_bgw_search', {
+        'enabled': True,
+        'model': 'perplexity/sonar',
+        'cache_ttl_seconds': 21600,
+        'max_results': 5
+    }),
+}
+
+# Convenience accessors
+INTELLIGENCE_ENABLED: bool = INTELLIGENCE['enabled']
+INTELLIGENCE_MODEL: str = INTELLIGENCE['model']
+INTELLIGENCE_FALLBACK_MODELS: List[str] = INTELLIGENCE['fallback_models']
+INTELLIGENCE_RETRIES: int = INTELLIGENCE['retries']
+INTELLIGENCE_TIMEOUT_SECONDS: int = INTELLIGENCE['timeout_seconds']
+INTELLIGENCE_CACHE_TTL_SECONDS: int = INTELLIGENCE['cache_ttl_seconds']
+INTELLIGENCE_SECTIONS: Dict[str, bool] = INTELLIGENCE['sections']
+INTELLIGENCE_MAX_TOKENS: Dict[str, int] = INTELLIGENCE['max_tokens']
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -255,6 +303,9 @@ def reload_config() -> None:
     global DATA, DATA_STALENESS_HOURS, DATA_MIN_MINUTES, DATA_TOP_PLAYERS_POOL
     global COMPETITIVE, TOP_GLOBAL_COUNT, TRANSFER_HISTORY_GWS
     global OUTPUT, NO_COMPETITIVE, VERBOSE
+    global INTELLIGENCE, INTELLIGENCE_ENABLED, INTELLIGENCE_MODEL, INTELLIGENCE_FALLBACK_MODELS
+    global INTELLIGENCE_RETRIES, INTELLIGENCE_TIMEOUT_SECONDS, INTELLIGENCE_CACHE_TTL_SECONDS
+    global INTELLIGENCE_SECTIONS, INTELLIGENCE_MAX_TOKENS
     
     _CONFIG = load_config()
     
@@ -317,3 +368,36 @@ def reload_config() -> None:
     NO_COMPETITIVE = OUTPUT['no_competitive']
     VERBOSE = OUTPUT['verbose']
 
+    _intel = _CONFIG.get('intelligence', {})
+    _intel_sections = _intel.get('sections', {})
+    _intel_max_tokens = _intel.get('max_tokens', {})
+    INTELLIGENCE = {
+        'enabled': _intel.get('enabled', False),
+        'model': _intel.get('model', 'gpt-5.2'),
+        'fallback_models': _intel.get('fallback_models', ['gemini-3.1-pro-preview']),
+        'retries': _intel.get('retries', 2),
+        'timeout_seconds': _intel.get('timeout_seconds', 120),
+        'cache_ttl_seconds': _intel.get('cache_ttl_seconds', 86400),
+        'sections': {
+            'transfer_strategy': _intel_sections.get('transfer_strategy', True),
+            'wildcard_draft': _intel_sections.get('wildcard_draft', True),
+            'free_hit_draft': _intel_sections.get('free_hit_draft', True),
+            'chip_usage_strategy': _intel_sections.get('chip_usage_strategy', True),
+            'season_insights': _intel_sections.get('season_insights', True),
+        },
+        'max_tokens': {
+            'transfer_strategy': _intel_max_tokens.get('transfer_strategy', 1000),
+            'wildcard_draft': _intel_max_tokens.get('wildcard_draft', 900),
+            'free_hit_draft': _intel_max_tokens.get('free_hit_draft', 900),
+            'chip_usage_strategy': _intel_max_tokens.get('chip_usage_strategy', 1200),
+            'season_insights': _intel_max_tokens.get('season_insights', 800),
+        },
+    }
+    INTELLIGENCE_ENABLED = INTELLIGENCE['enabled']
+    INTELLIGENCE_MODEL = INTELLIGENCE['model']
+    INTELLIGENCE_FALLBACK_MODELS = INTELLIGENCE['fallback_models']
+    INTELLIGENCE_RETRIES = INTELLIGENCE['retries']
+    INTELLIGENCE_TIMEOUT_SECONDS = INTELLIGENCE['timeout_seconds']
+    INTELLIGENCE_CACHE_TTL_SECONDS = INTELLIGENCE['cache_ttl_seconds']
+    INTELLIGENCE_SECTIONS = INTELLIGENCE['sections']
+    INTELLIGENCE_MAX_TOKENS = INTELLIGENCE['max_tokens']
